@@ -1,12 +1,24 @@
 [binaries]
 c = 'i686-w64-mingw32-gcc'
 cpp = 'i686-w64-mingw32-g++'
-ar = 'i686-w64-mingw32-ar'
+# Use gcc-ar / gcc-ranlib / gcc-nm so static-archive symbol indices include
+# LTO bitcode symbols. Plain binutils ar/ranlib don't load the LTO plugin,
+# which causes link errors like "undefined reference to dxvk::Logger::info"
+# even when libdxvk.a contains the definitions (meson <=1.9.1 doesn't auto-wrap).
+ar = 'i686-w64-mingw32-gcc-ar'
+ranlib = 'i686-w64-mingw32-gcc-ranlib'
+nm = 'i686-w64-mingw32-gcc-nm'
 strip = 'i686-w64-mingw32-strip'
 windres = 'i686-w64-mingw32-windres'
 
-[properties]
-needs_exe_wrapper = true
+
+[built-in options]
+# AGGRESSIVE OPTIMIZATION: Modern CPU without AVX (32-bit stack alignment limitation)
+# westmere = Core i7 (2010): SSE4.2, PCLMUL, AES but NO AVX
+c_args = ['-O3', '-march=westmere', '-mtune=generic', '-msse4.2', '-mfpmath=sse', '-flto', '-ffast-math', '-funroll-loops', '-fomit-frame-pointer', '-fno-plt', '-fno-stack-protector']
+cpp_args = ['-O3', '-march=westmere', '-mtune=generic', '-msse4.2', '-mfpmath=sse', '-flto', '-ffast-math', '-funroll-loops', '-fomit-frame-pointer', '-fno-plt', '-fno-stack-protector']
+c_link_args = ['-flto', '-fuse-linker-plugin', '-Wl,-O1', '-Wl,--as-needed']
+cpp_link_args = ['-flto', '-fuse-linker-plugin', '-Wl,-O1', '-Wl,--as-needed']
 
 [host_machine]
 system = 'windows'

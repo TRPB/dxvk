@@ -15,10 +15,8 @@ DXVK_SRC_DIR=$(dirname "$DXVK_SRC_DIR")
 DXVK_BUILD_DIR=$(realpath "$2")"/dxvk-$DXVK_VERSION"
 DXVK_ARCHIVE_PATH=$(realpath "$2")"/dxvk-$DXVK_VERSION.tar.gz"
 
-if [ -e "$DXVK_BUILD_DIR" ]; then
-  echo "Build directory $DXVK_BUILD_DIR already exists"
-  exit 1
-fi
+# Create build directory if it doesn't exist (support incremental builds)
+mkdir -p "$DXVK_BUILD_DIR"
 
 shift 2
 
@@ -27,6 +25,7 @@ opt_devbuild=0
 opt_buildid=false
 opt_64_only=0
 opt_32_only=0
+opt_d3d9_only=0
 
 crossfile="build-win"
 
@@ -48,6 +47,9 @@ while [ $# -gt 0 ]; do
   "--32-only")
     opt_32_only=1
     ;;
+  "--d3d9-only")
+    opt_d3d9_only=1
+    ;;
   *)
     echo "Unrecognized option: $1" >&2
     exit 1
@@ -58,7 +60,7 @@ done
 function build_arch {
   export WINEARCH="win$1"
   export WINEPREFIX="$DXVK_BUILD_DIR/wine.$1"
-  
+
   cd "$DXVK_SRC_DIR"
 
   opt_strip=
@@ -66,20 +68,42 @@ function build_arch {
     opt_strip=--strip
   fi
 
-  meson setup --cross-file "$DXVK_SRC_DIR/$crossfile$1.txt" \
-        --buildtype "release"                               \
-        --prefix "$DXVK_BUILD_DIR"                          \
-        $opt_strip                                          \
-        --bindir "x$1"                                      \
-        --libdir "x$1"                                      \
-        -Db_ndebug=if-release                               \
-        -Dbuild_id=$opt_buildid                             \
-        "$DXVK_BUILD_DIR/build.$1"
+  # Check if build directory exists for incremental builds
+  if [ ! -d "$DXVK_BUILD_DIR/build.$1" ]; then
+    echo "Setting up fresh build for x$1..."
+    meson setup --cross-file "$DXVK_SRC_DIR/$crossfile$1.txt" \
+          --buildtype "release"                               \
+          --prefix "$DXVK_BUILD_DIR"                          \
+          $opt_strip                                          \
+          --bindir "x$1"                                      \
+          --libdir "x$1"                                      \
+          -Db_ndebug=if-release                               \
+          -Db_lto=true                                        \
+          -Dbuild_id=$opt_buildid                             \
+          "$DXVK_BUILD_DIR/build.$1"
+  else
+    echo "Using existing build directory for incremental build..."
+  fi
 
   cd "$DXVK_BUILD_DIR/build.$1"
-  ninja install
 
-  if [ $opt_devbuild -eq 0 ]; then
+  # Build only d3d9.dll if requested, otherwise build everything
+  if [ $opt_d3d9_only -eq 1 ]; then
+    echo "Building d3d9.dll only..."
+    ninja src/d3d9/d3d9.dll
+    mkdir -p "$DXVK_BUILD_DIR/x$1"
+
+    # Strip debug symbols unless this is a dev build
+    if [ $opt_devbuild -eq 0 ]; then
+      strip --strip-unneeded -o "$DXVK_BUILD_DIR/x$1/d3d9.dll" src/d3d9/d3d9.dll
+    else
+      cp src/d3d9/d3d9.dll "$DXVK_BUILD_DIR/x$1/"
+    fi
+  else
+    ninja install
+  fi
+
+  if [ $opt_devbuild -eq 0 ] && [ $opt_d3d9_only -eq 0 ]; then
     # get rid of some useless .a files
     rm "$DXVK_BUILD_DIR/x$1/"*.!(dll)
     rm -R "$DXVK_BUILD_DIR/build.$1"

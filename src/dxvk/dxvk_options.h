@@ -90,7 +90,7 @@ namespace dxvk {
     /// blocky on small effects). Parsed from "dxvk.transparentShadingRate".
     /// Validated against device khrFragmentShadingRate.maxFragmentSize;
     /// invalid or unsupported values fall back to {1,1}.
-    VkExtent2D transparentShadingRate = { 2u, 2u };
+    VkExtent2D transparentShadingRate = { 1u, 1u };
 
     /// Skip per-sample shading on additive/multiplicative blend pipelines.
     /// When true, FragmentOutputState leaves sampleShadingEnable=FALSE on
@@ -106,9 +106,10 @@ namespace dxvk {
     /// multiplicative fragment shaders. Pre-blurs textures so VRS 2x2
     /// block boundaries have less high-frequency content to alias, and
     /// is independently useful as a soft-blur on heavy glow effects.
-    /// 0.0 disables the SPIR-V rewrite entirely. Typical range 0.5–3.0.
+    /// 0.0 (default) disables the SPIR-V rewrite entirely. Typical
+    /// range when enabled: 0.5–3.0.
     /// Parsed from "dxvk.transparentMipBias".
-    float transparentMipBias = 2.5f;
+    float transparentMipBias = 0.0f;
   };
 
 }

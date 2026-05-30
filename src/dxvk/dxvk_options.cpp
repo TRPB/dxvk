@@ -45,9 +45,9 @@ namespace dxvk {
     maxMemoryBudget = VkDeviceSize(std::max(budget, 0)) << 20u;
 
     transparentShadingRate = parseShadingRate(
-      config.getOption<std::string>("dxvk.transparentShadingRate", "2x2"));
+      config.getOption<std::string>("dxvk.transparentShadingRate", "1x1"));
     transparentSkipSampleShading = config.getOption<bool>("dxvk.transparentSkipSampleShading", true);
-    transparentMipBias    = config.getOption<float>  ("dxvk.transparentMipBias",     2.5f);
+    transparentMipBias    = config.getOption<float>  ("dxvk.transparentMipBias",     0.0f);
   }
 
 }

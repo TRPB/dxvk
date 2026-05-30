@@ -17,6 +17,15 @@ When supersampling is enabled it:
 - Reduces significant FPS drops in games when there are a lot of glow/fire/particle effects on the screen
 - Provides options for tuning how it does that
 
+### Results
+
+### 1. Freelancer (2003)
+
+See the following screenshots. Framerate topleft. 
+
+- glow effect [unpatched (75fps)](screenshots/freelancer-glow-vanilla.png) / [patched (185fps - capped)](freelancer-glow-patched.png) 
+- smoke effect [unpatched (73fps)](screenshots/freelancer-smoke-vanilla.png) / [patched (181fps)](freelancer-smoke-patched.png)
+
 
 ### What it does not do
 

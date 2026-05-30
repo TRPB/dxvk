@@ -114,12 +114,15 @@ namespace dxvk {
     /// Fragment shading rate applied to soft-alpha particle pipelines —
     /// standard or premultiplied alpha-blend (SrcAlpha+InvSrcAlpha,
     /// One+InvSrcAlpha) on a multisampled pipeline that has a
-    /// depth-stencil attachment. Targets smoke / dust / soft fire /
-    /// light shafts. The DS-attachment + MSAA combo excludes UI/text
-    /// (rendered without DS, often 1x). Depth-test/write would be a
-    /// cleaner discriminator but isn't part of static pipeline state
-    /// in this codebase — so the gate is necessarily heuristic and
-    /// may need an app-profile override in some games.
+    /// depth-stencil attachment and is *not* alpha-tested. Targets
+    /// smoke / dust / soft fire / light shafts. The DS-attachment + MSAA
+    /// combo excludes UI/text; the alpha-test exclusion (via the d3d9
+    /// SpecAlphaCompareOp spec-constant tell) keeps alpha-blended
+    /// foliage edges (e.g. WoW 3.3.5a grass) on per-sample shading.
+    /// Depth-test/write would be a cleaner discriminator but isn't
+    /// part of static pipeline state in this codebase — so the gate
+    /// is necessarily heuristic and may need an app-profile override
+    /// in some games.
     /// Values and validation match transparentShadingRate. Defaults to
     /// {1,1} (off — explicit opt-in).
     /// Parsed from "dxvk.particleShadingRate".
@@ -139,6 +142,26 @@ namespace dxvk {
     /// the particle class. 0.0 (default) disables the SPIR-V rewrite.
     /// Parsed from "dxvk.particleMipBias".
     float particleMipBias = 0.0f;
+
+    /// Opt-in extension to the particle path: also apply the particle
+    /// optimizations (skip-srs, VRS rate, mip-bias) to pipelines that
+    /// have d3d9 alpha-test active (SpecAlphaCompareOp != ALWAYS).
+    ///
+    /// Default false — alpha-tested pipelines are excluded, so
+    /// alpha-tested foliage cutouts (e.g. WoW 3.3.5a grass) stay on
+    /// per-sample shading and stay sharp.
+    ///
+    /// Set true for D3D9 games whose smoke/dust uses alpha-test as
+    /// a "discard fully transparent" optimization (e.g. Freelancer
+    /// 2003) — otherwise their smoke draws don't match the particle
+    /// path. The two patterns (alpha-tested foliage vs alpha-tested
+    /// smoke) look identical in static pipeline state because the
+    /// real differentiator (depth-write enable) is dynamic state,
+    /// so it's a per-game knob.
+    ///
+    /// No effect on d3d11 (the spec-constant slot reads as 0 there).
+    /// Parsed from "dxvk.particleSkipAlphaTested".
+    bool particleSkipAlphaTested = false;
   };
 
 }

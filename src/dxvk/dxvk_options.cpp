@@ -53,6 +53,7 @@ namespace dxvk {
       config.getOption<std::string>("dxvk.particleShadingRate", "1x1"));
     particleSkipSampleShading = config.getOption<bool>("dxvk.particleSkipSampleShading", false);
     particleMipBias       = config.getOption<float>  ("dxvk.particleMipBias",        0.0f);
+    particleSkipAlphaTested = config.getOption<bool>("dxvk.particleSkipAlphaTested", false);
   }
 
 }

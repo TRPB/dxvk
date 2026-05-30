@@ -296,6 +296,7 @@ namespace dxvk {
   // Additive wins if both could match on a multi-RT pipeline (rare),
   // since it's the better-tested classification.
   static TransparencyClass classifyTransparencyPass(
+      const DxvkDevice*                    device,
       const DxvkGraphicsPipelineStateInfo& state) {
     TransparencyClass cls;
 
@@ -306,7 +307,39 @@ namespace dxvk {
     auto effectiveSamples = state.ms.sampleCount()
       ? state.ms.sampleCount() : state.rs.sampleCount();
     bool multisampled = effectiveSamples > VK_SAMPLE_COUNT_1_BIT;
-    bool softAlphaEligible = hasDepthAttachment && multisampled;
+
+    // d3d9 alpha-test gate, opt-in via dxvk.particleSkipAlphaTested.
+    //
+    // The d3d9 frontend stores the active VkCompareOp for alpha-test
+    // in SpecAlphaCompareOp (dword 1, bits 21..23 — see
+    // src/d3d9/d3d9_spec_constants.h). When alpha-test is disabled it
+    // writes VK_COMPARE_OP_ALWAYS. An op other than ALWAYS means the
+    // pipeline is alpha-tested — which could be either a foliage
+    // cutout (WoW 3.3.5a grass: alpha-test for the hard edge + alpha-
+    // blend for soft fringe, writes depth) or a soft particle with
+    // a "discard fully transparent" optimization (Freelancer 2003
+    // smoke: alpha-test discards alpha==0 pixels, does not write
+    // depth). The two are indistinguishable from static state
+    // because depth-write is dynamic state in this codebase.
+    //
+    // Default (skip=false) excludes alpha-tested pipelines so foliage
+    // stays on per-sample shading. Games whose smoke uses the
+    // discard-transparent pattern set skip=true to opt those in.
+    //
+    // dword 1 reads as 0 when the FS doesn't reference any dword-1
+    // spec constants (always on d3d11, sometimes on d3d9). Treated
+    // as "no signal" — fall through to the DS+MSAA gate regardless
+    // of this option.
+    bool includeAlphaTested = device->config().particleSkipAlphaTested;
+    bool alphaTestActive = false;
+    if (!includeAlphaTested) {
+      uint32_t specDword1 = state.sc.specConstants[1];
+      uint32_t alphaCmp = (specDword1 >> 21) & 0x7u;
+      alphaTestActive = specDword1 != 0u
+                     && alphaCmp != uint32_t(VK_COMPARE_OP_ALWAYS);
+    }
+
+    bool softAlphaEligible = hasDepthAttachment && multisampled && !alphaTestActive;
 
     for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
       if (!state.rt.getColorFormat(i) || !state.omBlend[i].blendEnable())
@@ -393,7 +426,7 @@ namespace dxvk {
     // Classify the pipeline once; drives VRS rate selection, the
     // sampleShadingEnable gate, and (in DxvkGraphicsPipelineShaderState::
     // getLinkage) the SampleRateShading SPIR-V strip + mip-bias rewrite.
-    TransparencyClass transparencyClass = classifyTransparencyPass(state);
+    TransparencyClass transparencyClass = classifyTransparencyPass(device, state);
 
     for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
       rtColorFormats[i] = state.rt.getColorFormat(i);
@@ -1023,7 +1056,7 @@ namespace dxvk {
       // Classify the pipeline and route to the matching config knobs.
       // Strip + mip-bias rewrites are useful even without VRS coarsening,
       // so this is independent of the shading-rate decision.
-      TransparencyClass cls = classifyTransparencyPass(state);
+      TransparencyClass cls = classifyTransparencyPass(device, state);
       const auto& cfg = device->config();
 
       // Strip SampleRateShading. Only meaningful when the PS originally
@@ -1385,7 +1418,7 @@ namespace dxvk {
     // monolithic compile path whenever this specific pipeline would
     // opt into VRS so the shading rate can be baked correctly.
     {
-      TransparencyClass cls = classifyTransparencyPass(state);
+      TransparencyClass cls = classifyTransparencyPass(m_device, state);
       VkExtent2D vrsRate = effectiveShadingRateFor(m_device, cls);
       if (vrsRate.width > 1u || vrsRate.height > 1u)
         return false;

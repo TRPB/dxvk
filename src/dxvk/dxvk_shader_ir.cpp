@@ -1799,6 +1799,12 @@ namespace dxvk {
     if (linkage && m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsStripSampleRateShading)
       DxvkShader::stripSampleRateShading(spirvCode);
 
+    // Pre-blur texture sampling in additive/multiplicative shaders so
+    // VRS 2x2 has less high-frequency input to alias. Bias value comes
+    // from dxvk.transparentMipBias via the linkage.
+    if (linkage && m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsAdditiveMipBias != 0.0f)
+      DxvkShader::injectMipBias(spirvCode, linkage->fsAdditiveMipBias);
+
     return spirvCode;
   }
 

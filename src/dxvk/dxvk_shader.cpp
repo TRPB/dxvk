@@ -6,6 +6,7 @@
 #include <dxvk_dummy_frag.h>
 
 #include <algorithm>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -19,7 +20,8 @@ namespace dxvk {
            && fsFlatShading             == other.fsFlatShading
            && sampleLocations           == other.sampleLocations
            && semanticIo                == other.semanticIo
-           && fsStripSampleRateShading  == other.fsStripSampleRateShading;
+           && fsStripSampleRateShading  == other.fsStripSampleRateShading
+           && fsAdditiveMipBias         == other.fsAdditiveMipBias;
 
     if (eq) {
       eq = prevStageOutputs.getVarCount() == other.prevStageOutputs.getVarCount();
@@ -46,6 +48,9 @@ namespace dxvk {
     hash.add(uint32_t(sampleLocations));
     hash.add(uint32_t(semanticIo));
     hash.add(uint32_t(fsStripSampleRateShading));
+    uint32_t mipBiasBits = 0u;
+    std::memcpy(&mipBiasBits, &fsAdditiveMipBias, sizeof(mipBiasBits));
+    hash.add(mipBiasBits);
 
     for (uint32_t i = 0; i < prevStageOutputs.getVarCount(); i++)
       hash.add(prevStageOutputs.getVar(i).hash());
@@ -75,6 +80,124 @@ namespace dxvk {
   const std::string& DxvkShader::getShaderDumpPath() {
     static std::string s_path = env::getEnvVar("DXVK_SHADER_DUMP_PATH");
     return s_path;
+  }
+
+
+  void DxvkShader::injectMipBias(SpirvCodeBuffer& code, float bias) {
+    uint32_t biasBits = 0u;
+    std::memcpy(&biasBits, &bias, sizeof(bias));
+
+    // Pass 1: find OpTypeFloat 32, any existing OpConstant of that type
+    // matching our bias value, and collect every implicit-LOD image
+    // sample we want to patch.
+    struct SamplePatch {
+      size_t   offset;
+      uint32_t length;
+      uint32_t maskPos;
+      bool     hasMask;
+      uint32_t mask;
+    };
+
+    uint32_t floatTypeId = 0u;
+    size_t   floatTypeEndOffset = 0u;
+    uint32_t biasConstId = 0u;
+    std::vector<SamplePatch> patches;
+
+    for (auto ins : code) {
+      spv::Op op = ins.opCode();
+
+      if (!floatTypeId && op == spv::OpTypeFloat && ins.arg(2) == 32u) {
+        floatTypeId = ins.arg(1);
+        floatTypeEndOffset = ins.offset() + ins.length();
+        continue;
+      }
+
+      if (floatTypeId && !biasConstId
+       && op == spv::OpConstant
+       && ins.arg(1) == floatTypeId
+       && ins.arg(3) == biasBits) {
+        biasConstId = ins.arg(2);
+        continue;
+      }
+
+      uint32_t maskPos = 0u;
+      switch (op) {
+        case spv::OpImageSampleImplicitLod:
+        case spv::OpImageSampleProjImplicitLod:
+        case spv::OpImageSparseSampleImplicitLod:
+        case spv::OpImageSparseSampleProjImplicitLod:
+          maskPos = 5u;
+          break;
+        case spv::OpImageSampleDrefImplicitLod:
+        case spv::OpImageSampleProjDrefImplicitLod:
+        case spv::OpImageSparseSampleDrefImplicitLod:
+        case spv::OpImageSparseSampleProjDrefImplicitLod:
+          maskPos = 6u;
+          break;
+        default:
+          continue;
+      }
+
+      SamplePatch p = { };
+      p.offset  = ins.offset();
+      p.length  = ins.length();
+      p.maskPos = maskPos;
+      p.hasMask = ins.length() > maskPos;
+      p.mask    = p.hasMask ? ins.arg(maskPos) : 0u;
+
+      // Leave ops alone that already control LOD selection explicitly.
+      // Bias would conflict with Lod, and adding it on top of Grad would
+      // shift an explicitly-chosen gradient — not our intent.
+      if (p.mask & (spv::ImageOperandsBiasMask
+                  | spv::ImageOperandsLodMask
+                  | spv::ImageOperandsGradMask))
+        continue;
+
+      patches.push_back(p);
+    }
+
+    if (!floatTypeId || patches.empty())
+      return;
+
+    bool insertConstant = !biasConstId;
+    if (insertConstant)
+      biasConstId = code.allocId();
+
+    // Pass 2: patch sample ops in reverse so earlier offsets stay valid.
+    for (auto it = patches.rbegin(); it != patches.rend(); ++it) {
+      const auto& p = *it;
+      uint32_t op = code.data()[p.offset] & spv::OpCodeMask;
+
+      if (p.hasMask) {
+        code.data()[p.offset + p.maskPos] = p.mask | spv::ImageOperandsBiasMask;
+        code.beginInsertion(p.offset + p.maskPos + 1u);
+        code.putWord(biasConstId);
+        uint32_t newLength = p.length + 1u;
+        code.data()[p.offset] = (newLength << spv::WordCountShift) | op;
+      } else {
+        code.beginInsertion(p.offset + p.length);
+        code.putWord(spv::ImageOperandsBiasMask);
+        code.putWord(biasConstId);
+        uint32_t newLength = p.length + 2u;
+        code.data()[p.offset] = (newLength << spv::WordCountShift) | op;
+      }
+    }
+
+    code.endInsertion();
+
+    // Insert the OpConstant right after the OpTypeFloat 32 declaration
+    // if we didn't find an existing one. The insertion point is in the
+    // module-global section, before any function body, so the sample-op
+    // offsets we patched above (all inside function bodies, after this
+    // point) don't need to remain valid past this step.
+    if (insertConstant) {
+      code.beginInsertion(floatTypeEndOffset);
+      code.putIns(spv::OpConstant, 4u);
+      code.putWord(floatTypeId);
+      code.putWord(biasConstId);
+      code.putWord(biasBits);
+      code.endInsertion();
+    }
   }
 
 

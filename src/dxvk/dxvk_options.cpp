@@ -46,6 +46,8 @@ namespace dxvk {
 
     transparentShadingRate = parseShadingRate(
       config.getOption<std::string>("dxvk.transparentShadingRate", "2x2"));
+    transparentSkipSampleShading = config.getOption<bool>("dxvk.transparentSkipSampleShading", true);
+    transparentMipBias    = config.getOption<float>  ("dxvk.transparentMipBias",     2.5f);
   }
 
 }

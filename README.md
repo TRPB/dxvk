@@ -101,6 +101,13 @@ In games that load their shaders during loading screens or in the menu, this can
 
 **Note:** Games which only load their D3D shaders at draw time (e.g. most Unreal Engine games) will still exhibit some stutter, although it should still be less severe than without this feature.
 
+### Transparent-pass shading optimizations
+DXVK detects pipelines that use additive (`dst=ONE`) or multiplicative (`src=DST_COLOR, dst=ZERO`) blend — typically fire, smoke, glow and particle passes — and offers three independent optimizations for them. Standard alpha-blend (text, UI, glass, soft-edge foliage) is excluded so those keep native per-pixel shading.
+
+- `dxvk.transparentShadingRate = 2x2` *(default)* — applies a pipeline-level coarse fragment shading rate via `VK_KHR_fragment_shading_rate`. Accepts `off` / `1x1` (disabled), `2x1`, `1x2`, `2x2`, `4x2`, `2x4`, `4x4`. Values exceeding the device's `maxFragmentSize` fall back to `1x1`. Has no effect on drivers without `pipelineFragmentShadingRate` support.
+- `dxvk.transparentSkipSampleShading = True` *(default)* — skips per-sample shading on these pipelines (multisample state) and strips `OpCapability SampleRateShading` + `Sample` decorations from the FS SPIR-V. Required for VRS coarsening to take effect when the FS originally declared sample-rate shading (e.g. via `d3d9.forceSampleRateShading`); otherwise the driver silently downgrades the rate back to `1x1`.
+- `dxvk.transparentMipBias = 2.5` *(default)* — injects a mip-LOD bias into every implicit-LOD image sample in the FS. Pre-blurs the textures so the VRS block boundaries have less high-frequency content to alias, and is independently useful as a soft-blur on heavy glow effects. `0.0` disables the SPIR-V rewrite entirely. Typical range 0.5–3.0.
+
 ## Build instructions
 
 In order to pull in all submodules that are needed for building, clone the repository using the following command:

@@ -91,6 +91,24 @@ namespace dxvk {
     /// Validated against device khrFragmentShadingRate.maxFragmentSize;
     /// invalid or unsupported values fall back to {1,1}.
     VkExtent2D transparentShadingRate = { 2u, 2u };
+
+    /// Skip per-sample shading on additive/multiplicative blend pipelines.
+    /// When true, FragmentOutputState leaves sampleShadingEnable=FALSE on
+    /// those pipelines and the FS SPIR-V is rewritten to drop the
+    /// SampleRateShading capability + Sample decorations. Independent of
+    /// the VRS rate — useful as a standalone optimization, and required
+    /// for VRS coarsening to actually take effect when the FS originally
+    /// declared SampleRateShading. Parsed from
+    /// "dxvk.transparentSkipSampleShading".
+    bool transparentSkipSampleShading = true;
+
+    /// Mip-LOD bias added to implicit-LOD image samples in additive/
+    /// multiplicative fragment shaders. Pre-blurs textures so VRS 2x2
+    /// block boundaries have less high-frequency content to alias, and
+    /// is independently useful as a soft-blur on heavy glow effects.
+    /// 0.0 disables the SPIR-V rewrite entirely. Typical range 0.5–3.0.
+    /// Parsed from "dxvk.transparentMipBias".
+    float transparentMipBias = 2.5f;
   };
 
 }

@@ -405,14 +405,15 @@ namespace dxvk {
     bool vrsActive = (effectiveRate.width > 1u || effectiveRate.height > 1u)
                   && isAdditivePass;
 
-    // Per-sample shading is skipped only on pipelines we're actively
-    // coarsening (vrsActive). MUST be off there: sampleShadingEnable =
-    // TRUE forces the driver to downgrade the requested rate to 1x1.
-    //
-    // Standard alpha-blend (text/UI/glass, soft-edge foliage) keeps
-    // per-sample shading on — disabling it across all blend modes
-    // visibly aliases foliage edges.
-    if (shaders.fs && shaders.fs->metadata().flags.test(DxvkShaderFlag::HasSampleRateShading) && !vrsActive) {
+    // Per-sample shading is skipped on additive/multiplicative blend
+    // pipelines when dxvk.transparentSkipSampleShading is on — they
+    // don't visibly benefit from per-sample work and it pairs with the
+    // SampleRateShading capability strip in the FS (see
+    // DxvkGraphicsPipelineShaderState::getLinkage). Standard alpha-blend
+    // (text/UI/glass, soft-edge foliage) keeps per-sample shading on —
+    // disabling it across all blend modes visibly aliases foliage edges.
+    bool skipSampleShading = isAdditivePass && device->config().transparentSkipSampleShading;
+    if (shaders.fs && shaders.fs->metadata().flags.test(DxvkShaderFlag::HasSampleRateShading) && !skipSampleShading) {
       msInfo.sampleShadingEnable  = VK_TRUE;
       msInfo.minSampleShading     = 1.0f;
     }
@@ -950,30 +951,41 @@ namespace dxvk {
           info.rtSwizzles[i] = state.omSwizzle[i].mapping();
       }
 
-      // Strip SampleRateShading on additive/multiplicative draws so the
-      // KHR_fragment_shading_rate coarse rate set in FragmentOutputState
-      // actually applies. Only meaningful when the PS originally declared
-      // the capability (e.g. via d3d9.forceSampleRateShading). Standard
-      // alpha-blend used by text/UI/glass is excluded so it keeps
-      // per-sample shading and stays sharp.
-      VkExtent2D vrsRate = getEffectiveShadingRate(device);
-      bool vrsEnabled = vrsRate.width > 1u || vrsRate.height > 1u;
-      if (vrsEnabled && shaderMeta.flags.test(DxvkShaderFlag::HasSampleRateShading)) {
-        for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
-          if (!state.rt.getColorFormat(i) || !state.omBlend[i].blendEnable())
-            continue;
-          VkBlendFactor src = state.omBlend[i].srcColorBlendFactor();
-          VkBlendFactor dst = state.omBlend[i].dstColorBlendFactor();
-          bool additive = dst == VK_BLEND_FACTOR_ONE
-                       && (src == VK_BLEND_FACTOR_ONE || src == VK_BLEND_FACTOR_SRC_ALPHA);
-          bool multiplicative = src == VK_BLEND_FACTOR_DST_COLOR
-                             && dst == VK_BLEND_FACTOR_ZERO;
-          if (additive || multiplicative) {
-            info.fsStripSampleRateShading = true;
-            break;
-          }
+      // Detect additive/multiplicative blend so we can tag this FS for
+      // the SampleRateShading capability strip. Standard alpha-blend
+      // used by text/UI/glass is excluded so it keeps per-sample
+      // shading and stays sharp. Detection is independent of VRS state
+      // — the strip is useful even without coarsening.
+      bool isAdditivePass = false;
+      for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+        if (!state.rt.getColorFormat(i) || !state.omBlend[i].blendEnable())
+          continue;
+        VkBlendFactor src = state.omBlend[i].srcColorBlendFactor();
+        VkBlendFactor dst = state.omBlend[i].dstColorBlendFactor();
+        bool additive = dst == VK_BLEND_FACTOR_ONE
+                     && (src == VK_BLEND_FACTOR_ONE || src == VK_BLEND_FACTOR_SRC_ALPHA);
+        bool multiplicative = src == VK_BLEND_FACTOR_DST_COLOR
+                           && dst == VK_BLEND_FACTOR_ZERO;
+        if (additive || multiplicative) {
+          isAdditivePass = true;
+          break;
         }
       }
+
+      // Strip SampleRateShading on additive/multiplicative draws. Only
+      // meaningful when the PS originally declared the capability (e.g.
+      // via d3d9.forceSampleRateShading). Paired with sampleShadingEnable
+      // = FALSE in FragmentOutputState for these pipelines. Gated on
+      // dxvk.transparentSkipSampleShading.
+      if (isAdditivePass
+       && shaderMeta.flags.test(DxvkShaderFlag::HasSampleRateShading)
+       && device->config().transparentSkipSampleShading)
+        info.fsStripSampleRateShading = true;
+
+      // Mip-LOD bias for additive/multiplicative draws. Gated on
+      // dxvk.transparentMipBias (0.0 disables the SPIR-V rewrite).
+      if (isAdditivePass && device->config().transparentMipBias != 0.0f)
+        info.fsAdditiveMipBias = device->config().transparentMipBias;
     }
 
     // Deal with undefined shader inputs

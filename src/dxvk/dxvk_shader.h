@@ -231,6 +231,13 @@ namespace dxvk {
     // declares SampleRateShading and the pipeline opts into VRS coarsening.
     bool fsStripSampleRateShading = false;
 
+    // Mip-LOD bias to inject into every implicit-LOD image sample in
+    // the FS. 0.0 means no rewrite. Sourced from dxvk.transparentMipBias
+    // and applied to additive/multiplicative blend pipelines. Baking
+    // the value into the linkage keeps the shader cache keyed on the
+    // bias actually used at compile time.
+    float fsAdditiveMipBias = 0.0f;
+
     VkPrimitiveTopology inputTopology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
 
     VkShaderStageFlagBits prevStage = VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
@@ -389,6 +396,20 @@ namespace dxvk {
      * rate is not silently downgraded back to 1x1 by per-sample shading.
      */
     static void stripSampleRateShading(SpirvCodeBuffer& code);
+
+    /**
+     * \brief Injects a mip-LOD bias into implicit-LOD image samples
+     *
+     * Mutates the given SPIR-V module in place. Walks every
+     * OpImageSample{Proj,Dref}*ImplicitLod (and sparse equivalents)
+     * and adds a Bias image operand referring to a float32 constant
+     * of \p bias. Ops that already specify Bias, Lod, or Grad are
+     * left alone. Used by the VRS path to pre-blur textures sampled
+     * by additive/multiplicative shaders so the 2x2 block boundaries
+     * have less high-frequency content to alias. No-op if the module
+     * has no OpTypeFloat 32 declaration or no implicit-LOD samples.
+     */
+    static void injectMipBias(SpirvCodeBuffer& code, float bias);
 
   private:
 

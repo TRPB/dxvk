@@ -23,8 +23,8 @@ When supersampling is enabled it:
 
 See the following screenshots. Framerate topleft. 
 
-- glow effect [unpatched (75fps)](screenshots/freelancer-glow-vanilla.png) / [patched (185fps - capped)](freelancer-glow-patched.png) 
-- smoke effect [unpatched (73fps)](screenshots/freelancer-smoke-vanilla.png) / [patched (181fps)](freelancer-smoke-patched.png)
+- glow effect [unpatched (75fps)](screenshots/freelancer-glow-vanilla.png) / [patched (175fps)](screenshots/freelancer-glow-patched.png) 
+- smoke effect [unpatched (73fps)](screenshots/freelancer-smoke-vanilla.png) / [patched (181fps)](screenshots/freelancer-smoke-patched.png)
 
 
 ### What it does not do

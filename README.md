@@ -32,6 +32,10 @@ See the following screenshots. Framerate topleft.
 - Improve general performance. These tweaks allow preventing supersampling from causing FPS drops, it does not improve overall game performance in scenes that do not have any transparent glow/fire/spell effects.
 
 
+### AI Disclosure
+
+This project was heavily AI assisted. It is designed to solve a very specific problem I have in older games I play regularly. Without AI it would have taken me far longer than I would have otherwise been willing to spend properly understanding all the nuances of 3d rendering.
+
 ### Relevant DXVK options for dxvk.conf
 
 `d3d9.forceSampleRateShading = true` - Enable this to force sample rate shading in d3d9 games (this option exists in upstream DXVK but is off by default and needed for these tweaks to work) 

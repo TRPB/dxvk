@@ -110,6 +110,35 @@ namespace dxvk {
     /// range when enabled: 0.5–3.0.
     /// Parsed from "dxvk.transparentMipBias".
     float transparentMipBias = 0.0f;
+
+    /// Fragment shading rate applied to soft-alpha particle pipelines —
+    /// standard or premultiplied alpha-blend (SrcAlpha+InvSrcAlpha,
+    /// One+InvSrcAlpha) on a multisampled pipeline that has a
+    /// depth-stencil attachment. Targets smoke / dust / soft fire /
+    /// light shafts. The DS-attachment + MSAA combo excludes UI/text
+    /// (rendered without DS, often 1x). Depth-test/write would be a
+    /// cleaner discriminator but isn't part of static pipeline state
+    /// in this codebase — so the gate is necessarily heuristic and
+    /// may need an app-profile override in some games.
+    /// Values and validation match transparentShadingRate. Defaults to
+    /// {1,1} (off — explicit opt-in).
+    /// Parsed from "dxvk.particleShadingRate".
+    VkExtent2D particleShadingRate = { 1u, 1u };
+
+    /// Skip per-sample shading on soft-alpha particle pipelines.
+    /// Mirrors transparentSkipSampleShading but for the particle class
+    /// (see particleShadingRate for the eligibility rule). Defaults to
+    /// false — opt-in, because the soft-alpha gate is heuristic and
+    /// disabling per-sample shading on a misclassified UI/foliage draw
+    /// would visibly alias edges.
+    /// Parsed from "dxvk.particleSkipSampleShading".
+    bool particleSkipSampleShading = false;
+
+    /// Mip-LOD bias added to implicit-LOD samples in soft-alpha
+    /// particle fragment shaders. Mirrors transparentMipBias but for
+    /// the particle class. 0.0 (default) disables the SPIR-V rewrite.
+    /// Parsed from "dxvk.particleMipBias".
+    float particleMipBias = 0.0f;
   };
 
 }

@@ -48,6 +48,11 @@ namespace dxvk {
       config.getOption<std::string>("dxvk.transparentShadingRate", "1x1"));
     transparentSkipSampleShading = config.getOption<bool>("dxvk.transparentSkipSampleShading", true);
     transparentMipBias    = config.getOption<float>  ("dxvk.transparentMipBias",     0.0f);
+
+    particleShadingRate = parseShadingRate(
+      config.getOption<std::string>("dxvk.particleShadingRate", "1x1"));
+    particleSkipSampleShading = config.getOption<bool>("dxvk.particleSkipSampleShading", false);
+    particleMipBias       = config.getOption<float>  ("dxvk.particleMipBias",        0.0f);
   }
 
 }

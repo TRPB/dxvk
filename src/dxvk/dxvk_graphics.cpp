@@ -266,20 +266,101 @@ namespace dxvk {
   }
 
 
-  // Returns the validated effective shading rate for transparent
-  // pipelines, or {1,1} if VRS is off / unsupported / unsupported-by-hw.
-  // The caller still needs to gate on whether the pipeline is actually
-  // additive/multiplicative.
-  static VkExtent2D getEffectiveShadingRate(const DxvkDevice* device) {
+  // Transparency-pass classification for the selective VRS / SRS-skip /
+  // mip-bias optimizations. A pipeline can be either additive (older,
+  // wider-coverage signal — fire/glow/multiplicative bloom) or a
+  // soft-alpha particle (heuristic — smoke/dust/light shafts), but not
+  // both. Pipelines that fit neither class are unaffected.
+  struct TransparencyClass {
+    bool isAdditive  = false;
+    bool isSoftAlpha = false;
+  };
+
+  // Classify a pipeline by its blend + attachment state.
+  //
+  //   isAdditive   — dst=ONE with src in {ONE, SRC_ALPHA} (additive), or
+  //                  src=DST_COLOR with dst=ZERO (multiplicative). Covers
+  //                  fire/glow/spell effects and additive bloom.
+  //
+  //   isSoftAlpha  — standard alpha-blend (SrcAlpha+InvSrcAlpha) or
+  //                  premultiplied alpha (One+InvSrcAlpha) on a pipeline
+  //                  that has a depth-stencil attachment and is rendered
+  //                  multisampled. The DS-attachment requirement
+  //                  excludes UI/text rendering directly to a swapchain
+  //                  with no DS; the multisample requirement excludes
+  //                  1x UI overlays. Depth-test/write would be the
+  //                  cleaner discriminator but isn't available — those
+  //                  are dynamic state in this codebase. Necessarily
+  //                  heuristic; opt-in via dxvk.particle* options.
+  //
+  // Additive wins if both could match on a multi-RT pipeline (rare),
+  // since it's the better-tested classification.
+  static TransparencyClass classifyTransparencyPass(
+      const DxvkGraphicsPipelineStateInfo& state) {
+    TransparencyClass cls;
+
+    // Soft-alpha eligibility from non-blend state. A DS attachment
+    // implies depth participation (not a pure UI pass); MSAA implies
+    // world-pass rendering.
+    bool hasDepthAttachment = state.rt.getDepthStencilFormat() != VK_FORMAT_UNDEFINED;
+    auto effectiveSamples = state.ms.sampleCount()
+      ? state.ms.sampleCount() : state.rs.sampleCount();
+    bool multisampled = effectiveSamples > VK_SAMPLE_COUNT_1_BIT;
+    bool softAlphaEligible = hasDepthAttachment && multisampled;
+
+    for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+      if (!state.rt.getColorFormat(i) || !state.omBlend[i].blendEnable())
+        continue;
+
+      VkBlendFactor src = state.omBlend[i].srcColorBlendFactor();
+      VkBlendFactor dst = state.omBlend[i].dstColorBlendFactor();
+
+      bool additive = dst == VK_BLEND_FACTOR_ONE
+                   && (src == VK_BLEND_FACTOR_ONE || src == VK_BLEND_FACTOR_SRC_ALPHA);
+      bool multiplicative = src == VK_BLEND_FACTOR_DST_COLOR
+                         && dst == VK_BLEND_FACTOR_ZERO;
+
+      if (additive || multiplicative) {
+        cls.isAdditive = true;
+        continue;
+      }
+
+      bool alphaBlend = dst == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+                     && (src == VK_BLEND_FACTOR_SRC_ALPHA || src == VK_BLEND_FACTOR_ONE);
+      if (alphaBlend && softAlphaEligible)
+        cls.isSoftAlpha = true;
+    }
+
+    if (cls.isAdditive)
+      cls.isSoftAlpha = false;
+
+    return cls;
+  }
+
+  // Validate a requested shading rate against device support. Returns
+  // {1,1} when VRS isn't supported, the requested rate is unset, or it
+  // exceeds the hardware max.
+  static VkExtent2D clampShadingRateToHw(const DxvkDevice* device, VkExtent2D rate) {
     if (!device->features().khrFragmentShadingRate.pipelineFragmentShadingRate)
       return { 1u, 1u };
-    VkExtent2D rate = device->config().transparentShadingRate;
     if (rate.width <= 1u && rate.height <= 1u)
       return { 1u, 1u };
     VkExtent2D maxSize = device->properties().khrFragmentShadingRate.maxFragmentSize;
     if (rate.width > maxSize.width || rate.height > maxSize.height)
       return { 1u, 1u };
     return rate;
+  }
+
+  // Pick + validate the shading rate for a classified transparency
+  // pass. {1,1} if neither class matches or the chosen config rate is
+  // off / unsupported.
+  static VkExtent2D effectiveShadingRateFor(const DxvkDevice* device,
+                                             const TransparencyClass& cls) {
+    if (cls.isAdditive)
+      return clampShadingRateToHw(device, device->config().transparentShadingRate);
+    if (cls.isSoftAlpha)
+      return clampShadingRateToHw(device, device->config().particleShadingRate);
+    return { 1u, 1u };
   }
 
 
@@ -309,13 +390,10 @@ namespace dxvk {
 
     feedbackLoop = state.om.feedbackLoop();
 
-    // isAdditivePass: blend is additive (dst=ONE) or multiplicative
-    // (DST_COLOR+ZERO). Drives the VRS 2x2 coarse rate, the
-    // SampleRateShading capability strip, and the sampleShadingEnable
-    // gate. Excludes standard alpha-blend (SrcAlpha+InvSrcAlpha) used by
-    // text/UI/glass and soft-edge foliage — those keep native per-pixel
-    // shading and stay sharp.
-    bool isAdditivePass = false;
+    // Classify the pipeline once; drives VRS rate selection, the
+    // sampleShadingEnable gate, and (in DxvkGraphicsPipelineShaderState::
+    // getLinkage) the SampleRateShading SPIR-V strip + mip-bias rewrite.
+    TransparencyClass transparencyClass = classifyTransparencyPass(state);
 
     for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
       rtColorFormats[i] = state.rt.getColorFormat(i);
@@ -341,19 +419,6 @@ namespace dxvk {
           if (writeMask) {
             cbAttachments[i] = state.omBlend[i].state();
             cbAttachments[i].colorWriteMask = writeMask;
-
-            if (cbAttachments[i].blendEnable) {
-              VkBlendFactor src = cbAttachments[i].srcColorBlendFactor;
-              VkBlendFactor dst = cbAttachments[i].dstColorBlendFactor;
-              // Additive: src=(ONE|SRC_ALPHA), dst=ONE
-              // Multiplicative: src=DST_COLOR, dst=ZERO
-              bool additive = dst == VK_BLEND_FACTOR_ONE
-                           && (src == VK_BLEND_FACTOR_ONE || src == VK_BLEND_FACTOR_SRC_ALPHA);
-              bool multiplicative = src == VK_BLEND_FACTOR_DST_COLOR
-                                 && dst == VK_BLEND_FACTOR_ZERO;
-              if (additive || multiplicative)
-                isAdditivePass = true;
-            }
 
             // If we're rendering to an emulated alpha-only render target, fix up blending
             if (cbAttachments[i].blendEnable && formatInfo->componentMask == VK_COLOR_COMPONENT_R_BIT && state.omSwizzle[i].rIndex() == 3) {
@@ -399,26 +464,30 @@ namespace dxvk {
         : VK_SAMPLE_COUNT_1_BIT;
     }
 
-    // Resolve the effective VRS rate from config + hardware support.
-    // {1,1} means "disabled" (off / unsupported / clamped by hw).
-    VkExtent2D effectiveRate = getEffectiveShadingRate(device);
-    bool vrsActive = (effectiveRate.width > 1u || effectiveRate.height > 1u)
-                  && isAdditivePass;
+    // Resolve the effective VRS rate from config + hardware support for
+    // this pipeline's class. {1,1} means "disabled" (off / unsupported /
+    // clamped by hw, or pipeline matches no transparency class).
+    VkExtent2D effectiveRate = effectiveShadingRateFor(device, transparencyClass);
+    bool vrsActive = effectiveRate.width > 1u || effectiveRate.height > 1u;
 
-    // Per-sample shading is skipped on additive/multiplicative blend
-    // pipelines when dxvk.transparentSkipSampleShading is on — they
-    // don't visibly benefit from per-sample work and it pairs with the
+    // Per-sample shading is skipped on classified transparency pipelines
+    // when the matching config knob is on. Pairs with the
     // SampleRateShading capability strip in the FS (see
-    // DxvkGraphicsPipelineShaderState::getLinkage). Standard alpha-blend
-    // (text/UI/glass, soft-edge foliage) keeps per-sample shading on —
-    // disabling it across all blend modes visibly aliases foliage edges.
-    bool skipSampleShading = isAdditivePass && device->config().transparentSkipSampleShading;
+    // DxvkGraphicsPipelineShaderState::getLinkage) and is required for
+    // VRS coarsening to actually take effect when the FS originally
+    // declared SampleRateShading. Pipelines outside the classifier keep
+    // per-sample shading on so alpha-tested foliage / text / UI stay
+    // sharp.
+    const auto& cfg = device->config();
+    bool skipSampleShading
+       = (transparencyClass.isAdditive  && cfg.transparentSkipSampleShading)
+      || (transparencyClass.isSoftAlpha && cfg.particleSkipSampleShading);
     if (shaders.fs && shaders.fs->metadata().flags.test(DxvkShaderFlag::HasSampleRateShading) && !skipSampleShading) {
       msInfo.sampleShadingEnable  = VK_TRUE;
       msInfo.minSampleShading     = 1.0f;
     }
 
-    // Pipeline-level fragment shading rate (dxvk.transparentShadingRate).
+    // Pipeline-level fragment shading rate (dxvk.{transparent,particle}ShadingRate).
     if (vrsActive)
       shadingRate = effectiveRate;
 
@@ -951,41 +1020,31 @@ namespace dxvk {
           info.rtSwizzles[i] = state.omSwizzle[i].mapping();
       }
 
-      // Detect additive/multiplicative blend so we can tag this FS for
-      // the SampleRateShading capability strip. Standard alpha-blend
-      // used by text/UI/glass is excluded so it keeps per-sample
-      // shading and stays sharp. Detection is independent of VRS state
-      // — the strip is useful even without coarsening.
-      bool isAdditivePass = false;
-      for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
-        if (!state.rt.getColorFormat(i) || !state.omBlend[i].blendEnable())
-          continue;
-        VkBlendFactor src = state.omBlend[i].srcColorBlendFactor();
-        VkBlendFactor dst = state.omBlend[i].dstColorBlendFactor();
-        bool additive = dst == VK_BLEND_FACTOR_ONE
-                     && (src == VK_BLEND_FACTOR_ONE || src == VK_BLEND_FACTOR_SRC_ALPHA);
-        bool multiplicative = src == VK_BLEND_FACTOR_DST_COLOR
-                           && dst == VK_BLEND_FACTOR_ZERO;
-        if (additive || multiplicative) {
-          isAdditivePass = true;
-          break;
-        }
-      }
+      // Classify the pipeline and route to the matching config knobs.
+      // Strip + mip-bias rewrites are useful even without VRS coarsening,
+      // so this is independent of the shading-rate decision.
+      TransparencyClass cls = classifyTransparencyPass(state);
+      const auto& cfg = device->config();
 
-      // Strip SampleRateShading on additive/multiplicative draws. Only
-      // meaningful when the PS originally declared the capability (e.g.
-      // via d3d9.forceSampleRateShading). Paired with sampleShadingEnable
-      // = FALSE in FragmentOutputState for these pipelines. Gated on
-      // dxvk.transparentSkipSampleShading.
-      if (isAdditivePass
-       && shaderMeta.flags.test(DxvkShaderFlag::HasSampleRateShading)
-       && device->config().transparentSkipSampleShading)
+      // Strip SampleRateShading. Only meaningful when the PS originally
+      // declared the capability (e.g. via d3d9.forceSampleRateShading).
+      // Paired with sampleShadingEnable=FALSE in FragmentOutputState for
+      // the same pipelines.
+      bool stripSrs
+         = (cls.isAdditive  && cfg.transparentSkipSampleShading)
+        || (cls.isSoftAlpha && cfg.particleSkipSampleShading);
+      if (stripSrs && shaderMeta.flags.test(DxvkShaderFlag::HasSampleRateShading))
         info.fsStripSampleRateShading = true;
 
-      // Mip-LOD bias for additive/multiplicative draws. Gated on
-      // dxvk.transparentMipBias (0.0 disables the SPIR-V rewrite).
-      if (isAdditivePass && device->config().transparentMipBias != 0.0f)
-        info.fsAdditiveMipBias = device->config().transparentMipBias;
+      // Mip-LOD bias rewrite (0.0 disables). Bias is baked into the
+      // linkage so the shader cache keys on the value actually used.
+      float mipBias = 0.0f;
+      if (cls.isAdditive)
+        mipBias = cfg.transparentMipBias;
+      else if (cls.isSoftAlpha)
+        mipBias = cfg.particleMipBias;
+      if (mipBias != 0.0f)
+        info.fsAdditiveMipBias = mipBias;
     }
 
     // Deal with undefined shader inputs
@@ -1321,24 +1380,15 @@ namespace dxvk {
       return false;
 
     // VRS state is pre-rasterization in the GPL split, but our decision
-    // to coarsen the rate depends on per-pipeline blend state which the
-    // pre-rasterization library doesn't see. Force the monolithic compile
-    // path whenever an additive/multiplicative draw would opt into VRS
-    // so the shading rate can be baked correctly.
-    VkExtent2D vrsRate = getEffectiveShadingRate(m_device);
-    if (vrsRate.width > 1u || vrsRate.height > 1u) {
-      for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
-        if (!state.rt.getColorFormat(i) || !state.omBlend[i].blendEnable())
-          continue;
-        VkBlendFactor src = state.omBlend[i].srcColorBlendFactor();
-        VkBlendFactor dst = state.omBlend[i].dstColorBlendFactor();
-        bool additive = dst == VK_BLEND_FACTOR_ONE
-                     && (src == VK_BLEND_FACTOR_ONE || src == VK_BLEND_FACTOR_SRC_ALPHA);
-        bool multiplicative = src == VK_BLEND_FACTOR_DST_COLOR
-                           && dst == VK_BLEND_FACTOR_ZERO;
-        if (additive || multiplicative)
-          return false;
-      }
+    // to coarsen the rate depends on per-pipeline blend + depth state
+    // which the pre-rasterization library doesn't see. Force the
+    // monolithic compile path whenever this specific pipeline would
+    // opt into VRS so the shading rate can be baked correctly.
+    {
+      TransparencyClass cls = classifyTransparencyPass(state);
+      VkExtent2D vrsRate = effectiveShadingRateFor(m_device, cls);
+      if (vrsRate.width > 1u || vrsRate.height > 1u)
+        return false;
     }
 
     // We do not implement setting certain rarely used render

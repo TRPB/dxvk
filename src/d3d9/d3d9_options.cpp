@@ -56,6 +56,7 @@ namespace dxvk {
     this->disableA8RT                   = config.getOption<bool>        ("d3d9.disableA8RT",                   false);
     this->memoryTrackTest               = config.getOption<bool>        ("d3d9.memoryTrackTest",               false);
     this->forceSamplerTypeSpecConstants = config.getOption<bool>        ("d3d9.forceSamplerTypeSpecConstants", false);
+    this->forceSwapchainMSAA            = config.getOption<int32_t>     ("d3d9.forceSwapchainMSAA",            -1);
     this->forceSampleRateShading        = config.getOption<bool>        ("d3d9.forceSampleRateShading",        false);
     this->forceAspectRatio              = config.getOption<std::string> ("d3d9.forceAspectRatio",              "");
     this->forceRefreshRate              = config.getOption<int32_t>     ("d3d9.forceRefreshRate",              0u);

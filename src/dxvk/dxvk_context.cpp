@@ -71,6 +71,9 @@ namespace dxvk {
     // Add a fast path to query debug utils support
     if (m_device->debugFlags().test(DxvkDebugFlag::Capture))
       m_features.set(DxvkContextFeature::DebugUtils);
+
+    // Create timeline semaphore for resource tracking IDs
+    m_trackingFence = m_device->createFence(DxvkFenceCreateInfo());
   }
   
   
@@ -136,6 +139,14 @@ namespace dxvk {
   void DxvkContext::flushCommandList(
     const VkDebugUtilsLabelEXT*       reason,
           DxvkSubmitStatus*           status) {
+    // If necessary, block any async queue on previous command completion
+    if (m_submitWaitId)
+      m_cmd->waitFence(m_trackingFence, std::exchange(m_submitWaitId, 0ull));
+
+    // Signal tracking timeline to current tracking ID
+    m_cmd->signalFence(m_trackingFence, m_trackingId);
+    m_submitLastId = m_trackingId;
+
     // Flush pending descriptor updates and assign the sync
     // point to the submission
     if (m_features.any(DxvkContextFeature::DescriptorHeap,
@@ -415,7 +426,11 @@ namespace dxvk {
     accessBatch.emplace_back(*dstBuffer, dstOffset, numBytes, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     accessBatch.emplace_back(*srcBuffer, srcOffset, numBytes, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
 
-    DxvkCmdBuffer cmdBuffer = prepareOutOfOrderTransfer(DxvkCmdBuffer::InitBuffer, accessBatch.size(), accessBatch.data());
+    DxvkCmdBuffer cmdBuffer = (srcBuffer->memFlags() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+      ? DxvkCmdBuffer::InitBuffer
+      : DxvkCmdBuffer::SdmaBuffer;
+
+    cmdBuffer = prepareOutOfOrderTransfer(cmdBuffer, accessBatch.size(), accessBatch.data());
 
     if (cmdBuffer == DxvkCmdBuffer::ExecBuffer)
       this->endCurrentPass(true);
@@ -1193,7 +1208,7 @@ namespace dxvk {
 
     if (access.image && access.imageLayout != access.image->info().layout) {
       // External release barrier and layout transition in one go
-      transitionImageLayout(*access.image, access.imageSubresources,
+      transitionImageLayout(cmdBuffer, *access.image, access.imageSubresources,
         access.stages, access.access, access.imageLayout,
         access.image->info().stages, access.image->info().access, false);
       flushImageLayoutTransitions(cmdBuffer);
@@ -1387,7 +1402,7 @@ namespace dxvk {
     if (image->queryLayout(image->getAvailableSubresources()) != image->info().layout) {
       endCurrentPass(true);
 
-      transitionImageLayout(*image,
+      transitionImageLayout(DxvkCmdBuffer::ExecBuffer, *image,
         image->getAvailableSubresources(),
         image->info().stages, image->info().access,
         image->info().layout, image->info().stages, image->info().access, false);
@@ -1406,7 +1421,7 @@ namespace dxvk {
 
     if (layout != image->info().layout) {
       if (layout == VK_IMAGE_LAYOUT_UNDEFINED || layout == VK_IMAGE_LAYOUT_PREINITIALIZED) {
-        transitionImageLayout(*image, image->getAvailableSubresources(),
+        transitionImageLayout(DxvkCmdBuffer::InitBuffer, *image, image->getAvailableSubresources(),
           image->info().stages, image->info().access, image->info().layout,
           image->info().stages, image->info().access, layout == VK_IMAGE_LAYOUT_UNDEFINED);
         flushImageLayoutTransitions(DxvkCmdBuffer::InitBarriers);
@@ -2238,7 +2253,11 @@ namespace dxvk {
     for (const auto& clear : m_deferredClears) {
       int32_t attachmentIndex = -1;
 
-      if (useRenderPass && m_state.om.framebufferInfo.isFullSize(clear.imageView))
+      // Don't try to fuse clears when there are feedback loops. If we clear the
+      // area being read, there needs to be a barrier in between the clear and the
+      // first draw.
+      if (useRenderPass && m_state.om.framebufferInfo.isFullSize(clear.imageView)
+       && !(m_state.gp.state.om.feedbackLoop() & clear.imageView->info().aspects))
         attachmentIndex = m_state.om.framebufferInfo.findAttachment(clear.imageView);
 
       clearBatch.add(batchClear(clear.imageView, attachmentIndex,
@@ -2340,12 +2359,17 @@ namespace dxvk {
 
       // Enable tracking so that we don't unnecessarily hit slow paths in the future
       if (dstImage->info().stages & graphicsStages)
-        dstImage->trackGfxStores();
+        needsNewBackingStorage |= !dstImage->trackGfxStores();
 
       if (needsNewBackingStorage) {
         auto imageSubresource = dstImage->getAvailableSubresources();
 
         if (dstSubresource != imageSubresource || !isFullWrite || !dstImage->canRelocate())
+          continue;
+
+        // On desktop there's no real point in allocating extra memory, just do
+        // the resolve late instead.
+        if (!m_device->perfHints().preferRenderPassOps)
           continue;
 
         // Allocate and assign new backing storage. Deliberately don't go through
@@ -2379,7 +2403,7 @@ namespace dxvk {
         ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
         : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
 
-      transitionImageLayout(*dstImage, dstSubresource,
+      transitionImageLayout(DxvkCmdBuffer::ExecBuffer, *dstImage, dstSubresource,
         dstImage->info().stages, dstImage->info().access, newLayout, stages, access,
         isFullWrite);
 
@@ -2602,10 +2626,12 @@ namespace dxvk {
   
   void DxvkContext::uploadBuffer(
     const Rc<DxvkBuffer>&           buffer,
+          VkDeviceSize              bufferOffset,
     const Rc<DxvkBuffer>&           source,
-          VkDeviceSize              sourceOffset) {
-    auto bufferSlice = buffer->getSliceInfo();
-    auto sourceSlice = source->getSliceInfo(sourceOffset, buffer->info().size);
+          VkDeviceSize              sourceOffset,
+          VkDeviceSize              size) {
+    auto bufferSlice = buffer->getSliceInfo(bufferOffset, size);
+    auto sourceSlice = source->getSliceInfo(sourceOffset, size);
 
     VkBufferCopy2 copyRegion = { VK_STRUCTURE_TYPE_BUFFER_COPY_2 };
     copyRegion.srcOffset = sourceSlice.offset;
@@ -2730,18 +2756,30 @@ namespace dxvk {
     const DxvkVertexInput*     attributes,
           uint32_t             bindingCount,
     const DxvkVertexInput*     bindings) {
-    m_flags.set(
-      DxvkContextFlag::GpDirtyPipelineState,
-      DxvkContextFlag::GpDirtyVertexBuffers);
+    // Avoiding redundant input layout setups from the front-end can be
+    // hard, but at least avoid rebinding the pipeline redundantly.
+    bool dirty = m_state.gp.state.il.attributeCount() != attributeCount
+              || m_state.gp.state.il.bindingCount() != bindingCount;
 
     for (uint32_t i = 0; i < bindingCount; i++) {
-      auto binding = bindings[i].binding();
+      auto newBinding = bindings[i].binding();
 
-      m_state.gp.state.ilBindings[i] = DxvkIlBinding(
-        binding.binding, 0,
-        binding.inputRate,
-        binding.divisor);
-      m_state.vi.vertexExtents[i] = binding.extent;
+      if (!dirty) {
+        auto oldExtent = m_state.vi.vertexExtents[i];
+        auto oldBinding = m_state.gp.state.ilBindings[i];
+
+        dirty = oldBinding.binding() != newBinding.binding
+             || oldBinding.inputRate() != newBinding.inputRate
+             || oldBinding.divisor() != newBinding.divisor
+             || oldExtent != newBinding.extent;
+      }
+
+      if (dirty) {
+        m_state.gp.state.ilBindings[i] = DxvkIlBinding(
+          newBinding.binding, 0, newBinding.inputRate,
+          newBinding.divisor);
+        m_state.vi.vertexExtents[i] = newBinding.extent;
+      }
     }
 
     for (uint32_t i = bindingCount; i < m_state.gp.state.il.bindingCount(); i++) {
@@ -2750,19 +2788,33 @@ namespace dxvk {
     }
 
     for (uint32_t i = 0; i < attributeCount; i++) {
-      auto attribute = attributes[i].attribute();
+      auto newAttribute = attributes[i].attribute();
 
-      m_state.gp.state.ilAttributes[i] = DxvkIlAttribute(
-        attribute.location,
-        attribute.binding,
-        attribute.format,
-        attribute.offset);
+      if (!dirty) {
+        auto oldAttribute = m_state.gp.state.ilAttributes[i];
+
+        dirty = oldAttribute.location() != newAttribute.location
+             || oldAttribute.binding() != newAttribute.binding
+             || oldAttribute.format() != newAttribute.format
+             || oldAttribute.offset() != newAttribute.offset;
+      }
+
+      if (dirty) {
+        m_state.gp.state.ilAttributes[i] = DxvkIlAttribute(
+          newAttribute.location, newAttribute.binding,
+          newAttribute.format,   newAttribute.offset);
+      }
     }
 
     for (uint32_t i = attributeCount; i < m_state.gp.state.il.attributeCount(); i++)
       m_state.gp.state.ilAttributes[i] = DxvkIlAttribute();
 
     m_state.gp.state.il = DxvkIlInfo(attributeCount, bindingCount);
+
+    if (dirty) {
+      m_flags.set(DxvkContextFlag::GpDirtyPipelineState,
+                  DxvkContextFlag::GpDirtyVertexBuffers);
+    }
   }
 
 
@@ -3501,7 +3553,12 @@ namespace dxvk {
     imageAccess.imageOffset = imageOffset;
     imageAccess.imageExtent = imageExtent;
 
-    DxvkCmdBuffer cmdBuffer = prepareOutOfOrderTransfer(DxvkCmdBuffer::InitBuffer,
+    // Try to perform image uploads on the async transfer queue
+    DxvkCmdBuffer cmdBuffer = (buffer->memFlags() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+      ? DxvkCmdBuffer::InitBuffer
+      : DxvkCmdBuffer::SdmaBuffer;
+
+    cmdBuffer = prepareOutOfOrderTransfer(cmdBuffer,
       accessBatch.size(), accessBatch.data());
 
     if (cmdBuffer == DxvkCmdBuffer::ExecBuffer)
@@ -4256,7 +4313,7 @@ namespace dxvk {
       auto& dstAccess = accessBatch.emplace_back(*dstImage, dstSubresourceRange, dstImageLayout,
         VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
         dstImage->isFullSubresource(dstSubresource, extent));
-      dstAccess.imageOffset = srcOffset;
+      dstAccess.imageOffset = dstOffset;
       dstAccess.imageExtent = extent;
 
       auto& srcAccess = accessBatch.emplace_back(*srcImage, srcSubresourceRange, srcImageLayout,
@@ -4630,6 +4687,12 @@ namespace dxvk {
     // We need to write a storage image, so ignore non-color images
     if (dstSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT
      || srcSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT)
+      return false;
+
+    // Also ignore multisampled images since we don't handle or enable any of
+    // the shaderStorageImageMultisample stuff and the corresponding DLRL cap.
+    // Only AMD/NV implement that anyway, so probably not worth it.
+    if (dstImage.info().sampleCount != VK_SAMPLE_COUNT_1_BIT)
       return false;
 
     // Check whether the source image is bound as a color attachment
@@ -5985,7 +6048,8 @@ namespace dxvk {
         DxvkContextFlag::GpDirtyDepthBias,
         DxvkContextFlag::GpDirtyDepthBounds,
         DxvkContextFlag::GpDirtyDepthClip,
-        DxvkContextFlag::GpDirtyDepthTest);
+        DxvkContextFlag::GpDirtyDepthTest,
+        DxvkContextFlag::GpDirtySpecDataBlock);
 
       m_flags.clr(
         DxvkContextFlag::GpRenderPassSuspended,
@@ -6630,6 +6694,7 @@ namespace dxvk {
 
     m_descriptorState.dirtyStages(VK_SHADER_STAGE_ALL_GRAPHICS);
 
+    m_flags.set(DxvkContextFlag::GpDirtySpecDataBlock);
     m_flags.clr(DxvkContextFlag::GpDirtyPipeline);
     return true;
   }
@@ -6649,18 +6714,9 @@ namespace dxvk {
                 DxvkContextFlag::GpDynamicMultisampleState,
                 DxvkContextFlag::GpDynamicRasterizerState,
                 DxvkContextFlag::GpDynamicSampleLocations,
+                DxvkContextFlag::GpDynamicViewport,
                 DxvkContextFlag::GpHasPushData,
                 DxvkContextFlag::GpIndependentSets);
-    
-    m_flags.set(m_state.gp.state.useDynamicBlendConstants()
-      ? DxvkContextFlag::GpDynamicBlendConstants
-      : DxvkContextFlag::GpDirtyBlendConstants);
-    
-    m_flags.set((!m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasRasterizerDiscard))
-      ? DxvkContextFlags(DxvkContextFlag::GpDynamicRasterizerState,
-                         DxvkContextFlag::GpDynamicDepthBias)
-      : DxvkContextFlags(DxvkContextFlag::GpDirtyRasterizerState,
-                         DxvkContextFlag::GpDirtyDepthBias));
 
     // Retrieve and bind actual Vulkan pipeline handle
     auto pipelineInfo = m_state.gp.pipeline->getPipelineHandle(m_state.gp.state);
@@ -6671,66 +6727,97 @@ namespace dxvk {
     m_cmd->cmdBindPipeline(DxvkCmdBuffer::ExecBuffer,
       VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineInfo.handle);
 
+    // Independent pipeline layout affects all resource updates
+    if (pipelineInfo.type == DxvkGraphicsPipelineType::BasePipeline)
+      m_flags.set(DxvkContextFlag::GpIndependentSets);
+
+    if (!m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasRasterizerDiscard)) {
+      // Some state is aways dynamic when used
+      m_flags.set(DxvkContextFlag::GpDynamicRasterizerState,
+                  DxvkContextFlag::GpDynamicDepthBias,
+                  DxvkContextFlag::GpDynamicViewport);
+
+      m_flags.set(m_state.gp.state.useDynamicBlendConstants()
+        ? DxvkContextFlag::GpDynamicBlendConstants
+        : DxvkContextFlag::GpDirtyBlendConstants);
+
+      if (pipelineInfo.type == DxvkGraphicsPipelineType::BasePipeline) {
+        // For pipelines created from graphics pipeline libraries, we need to
+        // apply a bunch of dynamic state that is otherwise static or unused
+        if (!m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasRasterizerDiscard)) {
+          m_flags.set(DxvkContextFlag::GpDynamicDepthBias,
+                      DxvkContextFlag::GpDynamicDepthTest,
+                      DxvkContextFlag::GpDynamicStencilTest);
+
+          if (m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable)
+            m_flags.set(DxvkContextFlag::GpDynamicDepthClip);
+
+          if (m_device->features().core.features.depthBounds)
+            m_flags.set(DxvkContextFlag::GpDynamicDepthBounds);
+
+          if (m_device->features().extExtendedDynamicState3.extendedDynamicState3RasterizationSamples
+          && m_device->features().extExtendedDynamicState3.extendedDynamicState3SampleMask
+          && m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasSampleRateShading))
+            m_flags.set(DxvkContextFlag::GpDynamicMultisampleState);
+
+          if (m_device->canUseSampleLocations(0u))
+            m_flags.set(DxvkContextFlag::GpDynamicSampleLocations);
+        }
+      } else if (!m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasRasterizerDiscard)) {
+        // Conditionally set up dynamic state based on pipeline state.
+        // Must match DxvkGraphicsPipelineDynamicState behaviour exactly.
+        if (m_device->features().core.features.depthBounds) {
+          m_flags.set(m_state.gp.state.useDynamicDepthBounds()
+            ? DxvkContextFlag::GpDynamicDepthBounds
+            : DxvkContextFlag::GpDirtyDepthBounds);
+        }
+
+        if (m_device->canUseSampleLocations(0u)) {
+          m_flags.set(m_state.gp.state.useSampleLocations()
+            ? DxvkContextFlag::GpDynamicSampleLocations
+            : DxvkContextFlag::GpDirtySampleLocations);
+        }
+
+        m_flags.set(m_state.gp.state.useDynamicDepthTest()
+          ? DxvkContextFlag::GpDynamicDepthTest
+          : DxvkContextFlag::GpDirtyDepthTest);
+
+        m_flags.set(m_state.gp.state.useDynamicStencilTest()
+          ? DxvkContextFlags(DxvkContextFlag::GpDynamicStencilTest)
+          : DxvkContextFlags(DxvkContextFlag::GpDirtyStencilTest,
+                            DxvkContextFlag::GpDirtyStencilRef));
+
+        // Dirty state that is never dynamic for optimized pipelines
+        if (m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable)
+          m_flags.set(DxvkContextFlag::GpDirtyDepthClip);
+
+        m_flags.set(DxvkContextFlag::GpDirtyMultisampleState);
+      }
+    } else {
+      // If rasterization is disabled, none of the raster-related
+      // dynamic state is used either so mark all of that as dirty.
+      m_flags.set(DxvkContextFlag::GpDirtyDepthBias,
+                  DxvkContextFlag::GpDirtyDepthBounds,
+                  DxvkContextFlag::GpDirtyDepthClip,
+                  DxvkContextFlag::GpDirtyDepthTest,
+                  DxvkContextFlag::GpDirtyStencilTest,
+                  DxvkContextFlag::GpDirtyStencilRef,
+                  DxvkContextFlag::GpDirtyMultisampleState,
+                  DxvkContextFlag::GpDirtyRasterizerState,
+                  DxvkContextFlag::GpDirtySampleLocations,
+                  DxvkContextFlag::GpDirtyViewport);
+    }
+
     // Update attachment usage info based on the pipeline state
     m_state.om.attachmentMask.merge(pipelineInfo.attachments);
-
-    // For pipelines created from graphics pipeline libraries, we need to
-    // apply a bunch of dynamic state that is otherwise static or unused
-    if (pipelineInfo.type == DxvkGraphicsPipelineType::BasePipeline) {
-      m_flags.set(DxvkContextFlag::GpDynamicDepthBias,
-                  DxvkContextFlag::GpDynamicDepthTest,
-                  DxvkContextFlag::GpDynamicStencilTest,
-                  DxvkContextFlag::GpIndependentSets);
-
-      if (m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable)
-        m_flags.set(DxvkContextFlag::GpDynamicDepthClip);
-
-      if (m_device->features().core.features.depthBounds)
-        m_flags.set(DxvkContextFlag::GpDynamicDepthBounds);
-
-      if (m_device->features().extExtendedDynamicState3.extendedDynamicState3RasterizationSamples
-       && m_device->features().extExtendedDynamicState3.extendedDynamicState3SampleMask) {
-        m_flags.set(m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasSampleRateShading)
-          ? DxvkContextFlag::GpDynamicMultisampleState
-          : DxvkContextFlag::GpDirtyMultisampleState);
-      }
-
-      if (m_device->canUseSampleLocations(0u))
-        m_flags.set(DxvkContextFlag::GpDynamicSampleLocations);
-    } else {
-      if (m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable)
-        m_flags.set(DxvkContextFlag::GpDirtyDepthClip);
-
-      if (m_device->features().core.features.depthBounds) {
-        m_flags.set(m_state.gp.state.useDynamicDepthBounds()
-          ? DxvkContextFlag::GpDynamicDepthBounds
-          : DxvkContextFlag::GpDirtyDepthBounds);
-      }
-
-      if (m_device->canUseSampleLocations(0u)) {
-        m_flags.set(m_state.gp.state.useSampleLocations()
-          ? DxvkContextFlag::GpDynamicSampleLocations
-          : DxvkContextFlag::GpDirtySampleLocations);
-      }
-
-      m_flags.set(m_state.gp.state.useDynamicDepthTest()
-        ? DxvkContextFlag::GpDynamicDepthTest
-        : DxvkContextFlag::GpDirtyDepthTest);
-
-      m_flags.set(m_state.gp.state.useDynamicStencilTest()
-        ? DxvkContextFlags(DxvkContextFlag::GpDynamicStencilTest)
-        : DxvkContextFlags(DxvkContextFlag::GpDirtyStencilTest,
-                           DxvkContextFlag::GpDirtyStencilRef));
-
-      m_flags.set(
-        DxvkContextFlag::GpDirtyMultisampleState);
-    }
 
     // If necessary, dirty descriptor sets due to layout incompatibilities
     auto newPipelineLayoutType = getActivePipelineLayoutType(VK_PIPELINE_BIND_POINT_GRAPHICS);
 
-    if (newPipelineLayoutType != oldPipelineLayoutType)
+    if (newPipelineLayoutType != oldPipelineLayoutType) {
       m_descriptorState.dirtyStages(VK_SHADER_STAGE_ALL_GRAPHICS);
+      m_flags.set(DxvkContextFlag::GpDirtySpecDataBlock);
+    }
 
     // Also update push constant status when we know the final layout
     auto layout = m_state.gp.pipeline->getLayout()->getLayout(newPipelineLayoutType);
@@ -6749,6 +6836,9 @@ namespace dxvk {
 
     if (unlikely(m_features.test(DxvkContextFeature::DebugUtils))) {
       uint32_t color = getGraphicsPipelineDebugColor();
+
+      if (pipelineInfo.type == DxvkGraphicsPipelineType::BasePipeline)
+        color -= (color & 0xfcfcfcfcu) >> 2u;
 
       m_cmd->cmdInsertDebugUtilsLabel(DxvkCmdBuffer::ExecBuffer,
         vk::makeLabel(color, m_state.gp.pipeline->debugName()));
@@ -6812,7 +6902,8 @@ namespace dxvk {
 
     if (BindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       m_flags.clr(DxvkContextFlag::GpDirtySpecConstants);
-      m_flags.set(DxvkContextFlag::GpDirtyPipelineState);
+      m_flags.set(DxvkContextFlag::GpDirtyPipelineState,
+                  DxvkContextFlag::GpDirtySpecDataBlock);
     } else {
       m_flags.clr(DxvkContextFlag::CpDirtySpecConstants);
       m_flags.set(DxvkContextFlag::CpDirtyPipelineState);
@@ -6885,6 +6976,7 @@ namespace dxvk {
     // Find out which sets we actually need to update based on the pipeline
     // layout. This may be an empty mask if only unrelated resources were
     // changed, but we have no way of knowing that up-front.
+    uint32_t baseSetIndex = uint32_t(pipelineLayout->usesSamplerHeap());
     uint32_t dirtySetMask = layout->getDirtySetMask(pipelineLayoutType, m_descriptorState);
 
     if (likely(dirtySetMask)) {
@@ -7079,7 +7171,7 @@ namespace dxvk {
         VkBindDescriptorSetsInfo bindInfo = { VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO };
         bindInfo.stageFlags = pipelineLayout->getShaderStageMask();
         bindInfo.layout = pipelineLayout->getPipelineLayout();
-        bindInfo.firstSet = first + uint32_t(pipelineLayout->usesSamplerHeap());
+        bindInfo.firstSet = first + baseSetIndex;
         bindInfo.descriptorSetCount = count;
         bindInfo.pDescriptorSets = &sets[first];
 
@@ -7087,6 +7179,33 @@ namespace dxvk {
 
         dirtySetMask &= countMask;
       } while (dirtySetMask);
+    }
+
+    if (BindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS
+     && unlikely(m_flags.all(DxvkContextFlag::GpIndependentSets, DxvkContextFlag::GpDirtySpecDataBlock))) {
+      VkDescriptorSet set = m_descriptorPool->alloc(m_trackingId, m_device->getSpecDataSetLayout());
+
+      VkWriteDescriptorSetInlineUniformBlock blockInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK };
+      blockInfo.dataSize = sizeof(DxvkScInfo);
+      blockInfo.pData = m_state.gp.state.sc.specConstants;
+
+      VkWriteDescriptorSet writeInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &blockInfo };
+      writeInfo.dstSet = set;
+      writeInfo.descriptorCount = blockInfo.dataSize;
+      writeInfo.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+
+      m_cmd->updateDescriptorSets(1u, &writeInfo);
+
+      VkBindDescriptorSetsInfo bindInfo = { VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO };
+      bindInfo.stageFlags = pipelineLayout->getShaderStageMask();
+      bindInfo.layout = pipelineLayout->getPipelineLayout();
+      bindInfo.firstSet = baseSetIndex + DxvkDescriptorSets::GpIndependentSetCount;
+      bindInfo.descriptorSetCount = 1u;
+      bindInfo.pDescriptorSets = &set;
+
+      m_cmd->cmdBindDescriptorSets(DxvkCmdBuffer::ExecBuffer, &bindInfo);
+
+      m_flags.clr(DxvkContextFlag::GpDirtySpecDataBlock);
     }
   }
 
@@ -7099,11 +7218,15 @@ namespace dxvk {
     DxvkPipelineLayoutType pipelineLayoutType = getActivePipelineLayoutType(BindPoint);
     const auto* pipelineLayout = layout->getLayout(pipelineLayoutType);
 
+    // Check whether we need to update the embedded spec data block
+    bool updateSpecData = BindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS
+      && m_flags.all(DxvkContextFlag::GpIndependentSets, DxvkContextFlag::GpDirtySpecDataBlock);
+
     // Check if there's anything to do; the mask can be empty
     // in case only unrelated bindings have been updated.
     uint32_t dirtySetMask = layout->getDirtySetMask(pipelineLayoutType, m_descriptorState);
 
-    if (unlikely(!dirtySetMask))
+    if (unlikely(!dirtySetMask && !updateSpecData))
       return true;
 
     // Make sure we have enough space for the set. If this fails, the caller
@@ -7112,6 +7235,7 @@ namespace dxvk {
     // need to re-allocate all sets too.
     if (!m_cmd->canAllocateDescriptors(pipelineLayout)) {
       m_descriptorState.dirtyStages(VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT);
+      m_flags.set(DxvkContextFlag::GpDirtySpecDataBlock);
 
       if (!m_cmd->createDescriptorRange())
         return false;
@@ -7124,12 +7248,13 @@ namespace dxvk {
       dirtySetMask = layout->getDirtySetMask(pipelineLayoutType, m_descriptorState);
     }
 
-    std::array<uint32_t, DxvkDescriptorSets::SetCount> bufferIndices = { };
-    std::array<HeapOffset, DxvkDescriptorSets::SetCount> heapOffsets = { };
+    std::array<uint32_t, DxvkDescriptorSets::SetCount + 1u> bufferIndices = { };
+    std::array<HeapOffset, DxvkDescriptorSets::SetCount + 1u> heapOffsets = { };
 
     if constexpr (Model == DxvkBindingModel::DescriptorHeap) {
       // Make sure the heaps are actually valid and usable
-      m_cmd->ensureDescriptorHeapBinding();
+      if (unlikely(!m_cmd->ensureDescriptorHeapBinding()))
+        return false;
     } else {
       // The resource heap is always bound at index 1
       for (auto& index : bufferIndices)
@@ -7239,6 +7364,21 @@ namespace dxvk {
           }
         }
       }
+    }
+
+    if (unlikely(updateSpecData)) {
+      // Write current specialization consatnts directly into the descriptor heap
+      auto storage = m_cmd->allocateSpecData(pipelineLayout);
+      pipelineLayout->writeSpecData(storage.mapPtr, m_state.gp.state.sc.specConstants);
+
+      // Make sure that the descriptor offset gets updated properly. This uses the
+      // raw byte offset on the heap path, so don't apply the offset shift here.
+      uint32_t setIndex = DxvkDescriptorSets::GpIndependentSetCount;
+      heapOffsets[setIndex] = storage.offset;
+
+      dirtySetMask |= 1u << setIndex;
+
+      m_flags.clr(DxvkContextFlag::GpDirtySpecDataBlock);
     }
 
     do {
@@ -7687,7 +7827,8 @@ namespace dxvk {
 
   
   void DxvkContext::updateDynamicState() {
-    if (unlikely(m_flags.test(DxvkContextFlag::GpDirtyViewport))) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyViewport,
+                             DxvkContextFlag::GpDynamicViewport))) {
       m_flags.clr(DxvkContextFlag::GpDirtyViewport);
 
       // Clamp scissor against rendering area. Not doing so is technically
@@ -7791,8 +7932,8 @@ namespace dxvk {
       m_cmd->cmdSetBlendConstants(&m_state.dyn.blendConstants.r);
     }
 
-    if (m_flags.all(DxvkContextFlag::GpDirtyRasterizerState,
-                    DxvkContextFlag::GpDynamicRasterizerState)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyRasterizerState,
+                             DxvkContextFlag::GpDynamicRasterizerState))) {
       m_flags.clr(DxvkContextFlag::GpDirtyRasterizerState);
 
       m_cmd->cmdSetRasterizerState(
@@ -7827,8 +7968,8 @@ namespace dxvk {
       }
     }
 
-    if (m_flags.all(DxvkContextFlag::GpDirtyStencilTest,
-                    DxvkContextFlag::GpDynamicStencilTest)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyStencilTest,
+                             DxvkContextFlag::GpDynamicStencilTest))) {
       m_flags.clr(DxvkContextFlag::GpDirtyStencilTest);
 
       if (m_state.dyn.depthStencilState.stencilTest()) {
@@ -7864,16 +8005,16 @@ namespace dxvk {
       }
     }
 
-    if (m_flags.all(DxvkContextFlag::GpDirtyStencilRef,
-                    DxvkContextFlag::GpDynamicStencilTest)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyStencilRef,
+                             DxvkContextFlag::GpDynamicStencilTest))) {
       m_flags.clr(DxvkContextFlag::GpDirtyStencilRef);
 
       m_cmd->cmdSetStencilReference(VK_STENCIL_FRONT_AND_BACK,
         m_state.dyn.stencilReference);
     }
     
-    if (m_flags.all(DxvkContextFlag::GpDirtyDepthBias,
-                    DxvkContextFlag::GpDynamicDepthBias)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyDepthBias,
+                             DxvkContextFlag::GpDynamicDepthBias))) {
       m_flags.clr(DxvkContextFlag::GpDirtyDepthBias);
 
       if (m_device->features().extDepthBiasControl.depthBiasControl) {
@@ -7896,8 +8037,8 @@ namespace dxvk {
       }
     }
     
-    if (m_flags.all(DxvkContextFlag::GpDirtyDepthBounds,
-                    DxvkContextFlag::GpDynamicDepthBounds)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyDepthBounds,
+                             DxvkContextFlag::GpDynamicDepthBounds))) {
       m_flags.clr(DxvkContextFlag::GpDirtyDepthBounds);
 
       m_cmd->cmdSetDepthBounds(
@@ -7937,48 +8078,12 @@ namespace dxvk {
     pushInfo.data.address = &m_state.pc.resourceData[pushData.getOffset()];
     pushInfo.data.size = pushData.getSize();
 
-    if ((bit::tzcnt(pushData.getResourceDwordMask() + 1u) * 4u) < pushData.getSize()) {
+    if (layout->needsPushDataGather()) {
       pushInfo.data.address = &localData[pushData.getOffset()];
 
-      for (auto i : bit::BitMask(layout->getPushDataMask())) {
-        auto block = layout->getPushDataBlock(i);
-        auto blockSize = block.getSize();
-
-        auto srcOffset = computePushDataBlockOffset(i);
-        auto dstOffset = block.getOffset();
-
-        auto constantData = &m_state.pc.constantData[srcOffset];
-        auto resourceData = &m_state.pc.resourceData[dstOffset];
-
-        auto dstData = &localData[dstOffset];
-
-        uint32_t rangeOffset = 0u;
-
-        // Copy chunks of dwords either from the constant data array or
-        // the resource data array, depending on the resource mask.
-        uint64_t resourceMask = block.getResourceDwordMask();
-
-        while (resourceMask) {
-          uint32_t dwordIndex = bit::tzcnt(resourceMask);
-          uint32_t dwordCount = bit::tzcnt(resourceMask + (resourceMask & -resourceMask));
-
-          uint32_t byteIndex = dwordIndex * sizeof(uint32_t);
-          uint32_t byteCount = dwordCount * sizeof(uint32_t);
-
-          std::memcpy(&dstData[rangeOffset],
-            &constantData[rangeOffset], byteIndex);
-
-          std::memcpy(&dstData[rangeOffset + byteIndex],
-            &resourceData[rangeOffset + byteIndex],
-            byteCount - byteIndex);
-
-          resourceMask >>= dwordCount;
-          rangeOffset += byteCount;
-        }
-
-        std::memcpy(&dstData[rangeOffset],
-          &constantData[rangeOffset], blockSize - rangeOffset);
-      }
+      layout->gatherPushData(localData.data(),
+        m_state.pc.constantData.data(),
+        m_state.pc.resourceData.data());
     }
 
     if (m_features.test(DxvkContextFeature::DescriptorHeap)) {
@@ -8069,14 +8174,11 @@ namespace dxvk {
     if (m_flags.test(DxvkContextFlag::GpXfbActive)) {
       // If transform feedback is active and there is a chance that we might
       // need to rebind the pipeline, we need to end transform feedback and
-      // issue a barrier. End the render pass to do that. Ignore dirty vertex
-      // buffers here since non-dynamic vertex strides are such an extreme
-      // edge case that it's likely irrelevant in practice.
+      // potentially issue a barrier. Dirtying xfb buffers will do that.
       if (m_flags.any(DxvkContextFlag::GpDirtyPipelineState,
-                      DxvkContextFlag::GpDirtySpecConstants,
-                      DxvkContextFlag::GpDirtyXfbBuffers)) {
-        this->endCurrentPass(true);
-        this->flushBarriers();
+                      DxvkContextFlag::GpDirtySpecConstants)) {
+        m_flags.set(DxvkContextFlag::GpDirtyXfbBuffers);
+        this->pauseTransformFeedback();
       }
     }
 
@@ -8152,7 +8254,7 @@ namespace dxvk {
         // Doing this is safe even in case shader writes are used, because we keep
         // the actual tracking info intact. On the other hand, we cannot safely do
         // this if there are any pending writes without issuing a barrier.
-        if ((++m_unsynchronizedDrawCount == MaxUnsynchronizedDraws) && m_execBarriers.hasPendingAccess(vk::AccessWriteMask))
+        if ((++m_unsynchronizedDrawCount == MaxUnsynchronizedDraws) && !m_execBarriers.hasPendingAccess(vk::AccessWriteMask))
           m_flags.clr(DxvkContextFlag::GpRenderPassUnsynchronized);
       }
     }
@@ -8187,7 +8289,8 @@ namespace dxvk {
         return false;
     }
     
-    if (m_descriptorState.hasDirtyResources(VK_SHADER_STAGE_ALL_GRAPHICS)) {
+    if (m_descriptorState.hasDirtyResources(VK_SHADER_STAGE_ALL_GRAPHICS)
+     || unlikely(m_flags.all(DxvkContextFlag::GpIndependentSets, DxvkContextFlag::GpDirtySpecDataBlock))) {
       if (unlikely(!this->updateGraphicsShaderResources())) {
         // This can only happen if we were inside a secondary command buffer.
         // Technically it would be sufficient to only restart the secondary
@@ -8196,6 +8299,7 @@ namespace dxvk {
         this->endCurrentPass(true);
 
         m_cmd->createDescriptorRange();
+        m_cmd->ensureDescriptorHeapBinding();
 
         return this->commitGraphicsState<Indexed, Indirect>();
       }
@@ -8395,7 +8499,7 @@ namespace dxvk {
      && m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasTransformFeedback)) {
       for (uint32_t i = 0; i < MaxNumXfbBuffers; i++) {
         const auto& xfbBufferSlice = m_state.xfb.buffers[i];
-        const auto& xfbCounterSlice = m_state.xfb.activeCounters[i];
+        const auto& xfbCounterSlice = m_state.xfb.counters[i];
 
         if (xfbBufferSlice.length()) {
           requiresBarrier |= !xfbBufferSlice.buffer()->trackGfxStores();
@@ -9352,7 +9456,7 @@ namespace dxvk {
 
     if (likely(!keepAttachments || !overlapsRenderTarget(image, subresources))) {
       // Transition entire image to its default limit in one go
-      transitionImageLayout(image, subresources,
+      transitionImageLayout(DxvkCmdBuffer::ExecBuffer, image, subresources,
         image.info().stages, image.info().access, image.info().layout,
         image.info().stages, image.info().access, false);
       return true;
@@ -9378,14 +9482,14 @@ namespace dxvk {
               range.layerCount = 1u;
 
               if (!overlapsRenderTarget(image, range)) {
-                transitionImageLayout(image, range,
+                transitionImageLayout(DxvkCmdBuffer::ExecBuffer, image, range,
                   image.info().stages, image.info().access, image.info().layout,
                   image.info().stages, image.info().access, false);
               }
             }
           } else {
             // Transition entire mip level at once
-            transitionImageLayout(image, range,
+            transitionImageLayout(DxvkCmdBuffer::ExecBuffer, image, range,
               image.info().stages, image.info().access, image.info().layout,
               image.info().stages, image.info().access, false);
           }
@@ -9472,6 +9576,7 @@ namespace dxvk {
 
 
   bool DxvkContext::transitionImageLayout(
+          DxvkCmdBuffer             cmdBuffer,
           DxvkImage&                image,
     const VkImageSubresourceRange&  subresources,
           VkPipelineStageFlags2     srcStages,
@@ -9488,11 +9593,20 @@ namespace dxvk {
 
     VkImageLayout srcLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (!discard || !(image.info().usage & rtUsage))
+    // Always respect discard flag on SDMA queue since we won't
+    // issue any queue ownership transfers to that queue.
+    if (!discard || (!(image.info().usage & rtUsage) && cmdBuffer < DxvkCmdBuffer::SdmaBuffer))
       srcLayout = image.queryLayout(subresources);
 
     if (likely(srcLayout == dstLayout))
       return false;
+
+    // Just ensure that semaphore synchronization propagates
+    // properly and filter out bits unsupported on the queue
+    if (cmdBuffer == DxvkCmdBuffer::SdmaBarriers) {
+      srcStages = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+      srcAccess = VK_ACCESS_2_NONE;
+    }
 
     if (srcLayout == VK_IMAGE_LAYOUT_MAX_ENUM) {
       VkImageAspectFlags aspects = subresources.aspectMask;
@@ -9565,6 +9679,7 @@ namespace dxvk {
     // we can still try to move layout transitions that may be necessary to an
     // out-of-order command buffer in order to avoid additional barriers.
     bool promoteTransitions = m_imageLayoutTransitions.empty();
+    bool isSdma = cmdBuffer == DxvkCmdBuffer::SdmaBarriers;
 
     // Flush any barriers affecting the resources
     VkPipelineStageFlags2 srcStages = 0u;
@@ -9591,10 +9706,11 @@ namespace dxvk {
           }
         }
 
-        if (unlikely(e.stages & ~e.buffer->info().stages)
+        if (unlikely(isSdma)
+         || unlikely(e.stages & ~e.buffer->info().stages)
          || unlikely(e.access & ~e.buffer->info().access)) {
-          srcStages |= e.buffer->info().stages;
-          srcAccess |= e.buffer->info().access;
+          srcStages |= isSdma ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : e.buffer->info().stages;
+          srcAccess |= isSdma ? VK_ACCESS_2_NONE : e.buffer->info().access;
           dstStages |= e.stages;
           dstAccess |= e.access;
         }
@@ -9625,17 +9741,19 @@ namespace dxvk {
           }
         }
 
-        if (unlikely(e.stages & ~e.image->info().stages)
+        if (unlikely(isSdma)
+         || unlikely(e.stages & ~e.image->info().stages)
          || unlikely(e.access & ~e.image->info().access)) {
-          srcStages |= e.image->info().stages;
-          srcAccess |= e.image->info().access;
+          srcStages |= isSdma ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : e.image->info().stages;
+          srcAccess |= isSdma ? VK_ACCESS_2_NONE : e.image->info().access;
           dstStages |= e.stages;
           dstAccess |= e.access;
         }
 
         bool canPromote = !e.image->isTracked(m_trackingId, DxvkAccess::Write);
 
-        bool hasTransition = transitionImageLayout(*e.image, e.imageSubresources,
+        bool hasTransition = transitionImageLayout(cmdBuffer,
+          *e.image, e.imageSubresources,
           e.image->info().stages, e.image->info().access,
           e.imageLayout, e.stages, e.access, e.discard);
 
@@ -9668,26 +9786,39 @@ namespace dxvk {
           DxvkCmdBuffer             cmdBuffer,
           size_t                    count,
     const DxvkResourceAccess*       batch) {
-    for (size_t i = 0u; i < count; i++) {
-      const auto& e = batch[i];
+    if (likely(cmdBuffer < DxvkCmdBuffer::SdmaBuffer)) {
+      for (size_t i = 0u; i < count; i++) {
+        const auto& e = batch[i];
 
-      if (e.buffer) {
-        accessBuffer(cmdBuffer, *e.buffer, e.bufferOffset, e.bufferSize,
-          e.stages, e.access, e.buffer->info().stages, e.buffer->info().access,
-          DxvkAccessOp::None);
-      } else if (e.image) {
-        if (!e.imageExtent.width) {
-          accessImage(cmdBuffer, *e.image, e.imageSubresources,
-            e.imageLayout, e.stages, e.access, e.imageLayout,
-            e.image->info().stages, e.image->info().access,
+        if (e.buffer) {
+          accessBuffer(cmdBuffer, *e.buffer, e.bufferOffset, e.bufferSize,
+            e.stages, e.access, e.buffer->info().stages, e.buffer->info().access,
             DxvkAccessOp::None);
-        } else {
-          accessImageRegion(cmdBuffer, *e.image,
-            vk::pickSubresourceLayers(e.imageSubresources, 0u),
-            e.imageOffset, e.imageExtent, e.imageLayout,
-            e.stages, e.access, e.imageLayout,
-            e.image->info().stages, e.image->info().access,
-            DxvkAccessOp::None);
+        } else if (e.image) {
+          if (!e.imageExtent.width) {
+            accessImage(cmdBuffer, *e.image, e.imageSubresources,
+              e.imageLayout, e.stages, e.access, e.imageLayout,
+              e.image->info().stages, e.image->info().access,
+              DxvkAccessOp::None);
+          } else {
+            accessImageRegion(cmdBuffer, *e.image,
+              vk::pickSubresourceLayers(e.imageSubresources, 0u),
+              e.imageOffset, e.imageExtent, e.imageLayout,
+              e.stages, e.access, e.imageLayout,
+              e.image->info().stages, e.image->info().access,
+              DxvkAccessOp::None);
+          }
+        }
+      }
+    } else {
+      for (size_t i = 0u; i < count; i++) {
+        const auto& e = batch[i];
+
+        if (e.buffer) {
+          accessBufferTransfer(*e.buffer, e.stages, e.access);
+        } else if (e.image) {
+          accessImageTransfer(*e.image, e.imageSubresources,
+            e.imageLayout, e.stages, e.access);
         }
       }
     }
@@ -9776,6 +9907,9 @@ namespace dxvk {
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image.handle();
     barrier.subresourceRange = subresources;
+
+    if (barrier.subresourceRange.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+      barrier.subresourceRange.aspectMask = image.formatInfo()->aspectMask;
 
     // maintenance9 changed semantics for barriers involving 3D images
     if (image.info().flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT) {
@@ -10298,50 +10432,72 @@ namespace dxvk {
         : DxvkAccess::Read;
 
       if (e.buffer) {
-        if (!prepareOutOfOrderTransfer(*e.buffer, e.bufferOffset, e.bufferSize, access))
-          return DxvkCmdBuffer::ExecBuffer;
+        cmdBuffer = prepareOutOfOrderTransfer(cmdBuffer,
+          *e.buffer, e.bufferOffset, e.bufferSize, access);
       } else if (e.image) {
-        if (!prepareOutOfOrderTransfer(*e.image, e.imageSubresources, e.discard, access))
-          return DxvkCmdBuffer::ExecBuffer;
+        cmdBuffer = prepareOutOfOrderTransfer(cmdBuffer,
+          *e.image, e.imageSubresources, e.discard, access);
       }
+
+      if (cmdBuffer == DxvkCmdBuffer::ExecBuffer)
+        break;
     }
 
     return cmdBuffer;
   }
 
 
-  bool DxvkContext::prepareOutOfOrderTransfer(
+  DxvkCmdBuffer DxvkContext::prepareOutOfOrderTransfer(
+          DxvkCmdBuffer             cmdBuffer,
           DxvkBuffer&               buffer,
           VkDeviceSize              offset,
           VkDeviceSize              size,
           DxvkAccess                access) {
     // Sparse resources can alias, need to ignore.
     if (unlikely(buffer.info().flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT))
-      return false;
+      return DxvkCmdBuffer::ExecBuffer;
 
-    // If the resource hasn't been used yet or both uses are reads,
-    // we can use this buffer in the init command buffer
-    if (!buffer.isTracked(m_trackingId, access))
-      return true;
+    // If the buffer hasn't been used in the previous submission, we're
+    // good. Force proper synchronization, but allow for some overlap.
+    if (cmdBuffer == DxvkCmdBuffer::SdmaBuffer && buffer.getTrackId() < m_submitLastId) {
+      m_submitWaitId = std::max(m_submitWaitId, buffer.getTrackId());
+      return cmdBuffer;
+    }
 
-    // Otherwise, our only option is to discard. We can only do that if
-    // we're writing the full buffer. Therefore, the resource being read
-    // should always be checked first to avoid unnecessary discards.
-    if (access != DxvkAccess::Write || size < buffer.info().size || offset)
-      return false;
+    // Similarly, if we're reading from a buffer that cannot be written by the
+    // GPU, we can also safely perform the transfer op on any command buffer.
+    if (access == DxvkAccess::Read && !(buffer.info().access & vk::AccessWriteMask))
+      return cmdBuffer;
 
-    // Check if the buffer can actually be discarded at all.
-    if (!buffer.canRelocate())
-      return false;
+    // Otherwise, our only option is to discard, which we can only do if we're
+    // writing the full buffer. Therefore, the resource being read should always
+    // be checked first so that unnecessary discards are avoided.
+    bool canDiscard = access == DxvkAccess::Write && !offset
+      && size == buffer.info().size && buffer.canRelocate();
+
+    if (!canDiscard && cmdBuffer == DxvkCmdBuffer::SdmaBuffer)
+      cmdBuffer = DxvkCmdBuffer::InitBuffer;
+
+    // If the resource hasn't been used in the current command buffer yet or if
+    // both uses are reads, we can at least use this buffer in init commands
+    if (cmdBuffer < DxvkCmdBuffer::SdmaBuffer && !buffer.isTracked(m_trackingId, access))
+      return cmdBuffer;
+
+    // Buffer is in use, now we *really* need to discard
+    if (!canDiscard)
+      return DxvkCmdBuffer::ExecBuffer;
 
     // Ignore large buffers to keep memory overhead in check. Use a higher
     // threshold when a render pass is active to avoid interrupting it.
-    VkDeviceSize threshold = !m_flags.test(DxvkContextFlag::GpRenderPassActive)
-      ? MaxDiscardSizeInRp
-      : MaxDiscardSize;
+    // Also ignore the limit on SDMA since making large uploads asynchronous
+    // should be highly beneficial.
+    if (cmdBuffer < DxvkCmdBuffer::SdmaBuffer) {
+      VkDeviceSize threshold = m_flags.test(DxvkContextFlag::GpRenderPassActive)
+        ? MaxDiscardSizeInRp : MaxDiscardSize;
 
-    if (size > threshold)
-      return false;
+      if (size > threshold)
+        return DxvkCmdBuffer::ExecBuffer;
+    }
 
     // If the buffer is used for transform feedback in any way, we have to stop
     // the render pass anyway, but we can at least avoid an extra barrier.
@@ -10355,23 +10511,24 @@ namespace dxvk {
 
     // Actually allocate and assign new backing storage
     this->invalidateBuffer(&buffer, buffer.allocateStorage());
-    return true;
+    return cmdBuffer;
   }
 
 
-  bool DxvkContext::prepareOutOfOrderTransfer(
+  DxvkCmdBuffer DxvkContext::prepareOutOfOrderTransfer(
+          DxvkCmdBuffer             cmdBuffer,
           DxvkImage&                image,
     const VkImageSubresourceRange&  subresources,
           bool                      discard,
           DxvkAccess                access) {
     // Sparse resources can alias, need to ignore.
     if (unlikely(image.info().flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT))
-      return false;
+      return DxvkCmdBuffer::ExecBuffer;
 
     // Reject any images that use non-default image layouts since
     // per-subresource layout tracking relies on proper ordering
     if (unlikely(!image.hasUnifiedLayout()))
-      return false;
+      return DxvkCmdBuffer::ExecBuffer;
 
     // Ensure correct order of operations in case the image is a render
     // target and is either currently bound for rendering or has any
@@ -10379,12 +10536,37 @@ namespace dxvk {
     if (image.info().usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
       if (findOverlappingDeferredClear(image, subresources)
        || findOverlappingDeferredResolve(image, subresources))
-        return false;
+        return DxvkCmdBuffer::ExecBuffer;
 
       if (m_flags.test(DxvkContextFlag::GpRenderPassActive)) {
         if (isBoundAsRenderTarget(image, subresources))
-          return false;
+          return DxvkCmdBuffer::ExecBuffer;
       }
+    }
+
+    // Ignore images with more than one subresource since we'll
+    // usually see multiple uploads back to back
+    if (image.formatInfo()->aspectMask != VK_IMAGE_ASPECT_COLOR_BIT
+     || image.info().numLayers > 1u || image.info().mipLevels > 1u)
+      return DxvkCmdBuffer::ExecBuffer;
+
+    // For SDMA copies, we need to verify a few things to make sure that
+    // the image can actually be written on the transfer queue.
+    if (cmdBuffer == DxvkCmdBuffer::SdmaBuffer) {
+      // We can't do anything clever w.r.t. ownership transfers, so only
+      // allow SDMA copies to happen if we discard the entire image.
+      if (discard && m_device->features().khrMaintenance11.maintenance11) {
+        // If the image hasn't been used in the previous submission, simply
+        // synchronize queues and perform the upload. Don't attempt to discard
+        // images because emitting the initial transition would get weird.
+        if (image.getTrackId() < m_submitLastId) {
+          m_submitWaitId = std::max(m_submitWaitId, image.getTrackId());
+          return cmdBuffer;
+        }
+      }
+
+      // Fall back to regular out-of-order command buffer
+      cmdBuffer = DxvkCmdBuffer::InitBuffer;
     }
 
     // If the image hasn't been used yet or all uses are reads,
@@ -10393,7 +10575,16 @@ namespace dxvk {
     if (discard)
       access = DxvkAccess::Write;
 
-    return !image.isTracked(m_trackingId, access);
+    if (image.isTracked(m_trackingId, access))
+      return DxvkCmdBuffer::ExecBuffer;
+
+    // Don't do asynchronous image copies for now. We would only be able
+    // to support this if the image consists of only one subresource and
+    // if we can discard it.
+    if (cmdBuffer == DxvkCmdBuffer::SdmaBuffer)
+      cmdBuffer = DxvkCmdBuffer::InitBuffer;
+
+    return cmdBuffer;
   }
 
 

@@ -76,6 +76,9 @@ namespace dxvk {
     /// Whether shaders use FP16 for partial precision instructions
     bool useFP16;
 
+    /// Support depth formats for cube textures
+    bool supportCubeDepthFormats;
+
     /// Support the DF16 & DF24 texture format
     bool supportDFFormats;
 
@@ -123,7 +126,7 @@ namespace dxvk {
     bool cachedWriteOnlyBuffers;
 
     /// Use device local memory for constant buffers.
-    bool deviceLocalConstantBuffers;
+    Tristate deviceLocalConstantBuffers;
 
     /// Disable direct buffer mapping
     bool allowDirectBufferMapping;
@@ -167,15 +170,6 @@ namespace dxvk {
 
     /// Add an extra front buffer to make GetFrontBufferData() work correctly when the swapchain only has a single buffer
     bool extraFrontbuffer;
-
-    /// Use the uber shader for fixed function vertex shaders.
-    bool ffUbershaderVS;
-
-    /// Use the uber shader for fixed function fragment shaders.
-    bool ffUbershaderFS;
-
-    // Use the new DXBC-SPIRV based shader compiler.
-    bool useDxbcSpirv;
   };
 
 }

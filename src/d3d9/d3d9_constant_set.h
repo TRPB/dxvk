@@ -2,22 +2,14 @@
 
 #include "d3d9_caps.h"
 #include "d3d9_constant_buffer.h"
+#include "d3d9_constant_copy.h"
 #include "d3d9_constant_layout.h"
-
-
-#include "../dxso/dxso_isgn.h"
 
 #include "../util/util_vector.h"
 
 #include <cstdint>
 
 namespace dxvk {
-
-  enum class D3D9ConstantType {
-    Float,
-    Int,
-    Bool
-  };
 
   // We make an assumption later based on the packing of this struct for copying.
   struct D3D9ShaderConstantsVSSoftware {
@@ -38,15 +30,8 @@ namespace dxvk {
     uint32_t bConsts[1];
   };
 
-  struct D3D9SwvpConstantBuffers {
-    D3D9ConstantBuffer        intBuffer;
-    D3D9ConstantBuffer        boolBuffer;
-  };
-
   struct D3D9ConstantSets {
     D3D9ConstantLayout        layout;
-    D3D9SwvpConstantBuffers   swvp;
-    D3D9ConstantBuffer        buffer;
     D3D9ShaderConstantsInfo   shaderConstantsInfo;
     bool                      dirty = true;
     uint32_t                  changedFloatCount = 0u;

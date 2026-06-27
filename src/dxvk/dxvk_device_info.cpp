@@ -24,6 +24,7 @@ namespace dxvk {
     HANDLE_EXT(extDepthBiasControl);               \
     HANDLE_EXT(extDescriptorBuffer);               \
     HANDLE_EXT(extDescriptorHeap);                 \
+    HANDLE_EXT(extDynamicRenderingUnusedAttachments); \
     HANDLE_EXT(extExtendedDynamicState3);          \
     HANDLE_EXT(extFragmentShaderInterlock);        \
     HANDLE_EXT(extFullScreenExclusive);            \
@@ -486,16 +487,19 @@ namespace dxvk {
     const DxvkInstance&               instance,
           bool                        safeMode) {
     if (m_featuresSupported.extDescriptorHeap.descriptorHeap) {
-      // Only enable descriptor heaps on drivers that are known to work
-      // and don't have known performance regressions currently.
-      // TODO revisit w.r.t. Intel, Turnip.
+      // Only enable descriptor heaps on drivers that are known to work and don't
+      // have known performance regressions currently.
+      // Keep this disabled on Turnip for now to give the driver as much information
+      // about resources used as possible; CPU overhead should not matter there.
       bool enableDescriptorHeap = m_properties.vk12.driverID == VK_DRIVER_ID_MESA_RADV
+                               || m_properties.vk12.driverID == VK_DRIVER_ID_MESA_NVK
                                || m_properties.vk12.driverID == VK_DRIVER_ID_MESA_LLVMPIPE
+                               || m_properties.vk12.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA
                                || m_properties.vk12.driverID == VK_DRIVER_ID_AMD_PROPRIETARY;
 
-      // Heap regresses performance on the initial NV driver releases
+      // Heap regresses performance on the initial NV driver releases.
       if (m_properties.vk12.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
-        enableDescriptorHeap = m_featuresSupported.khrMaintenance11.maintenance11;
+        enableDescriptorHeap = m_properties.driverVersion >= Version(595u, 84u, 0u);
 
       applyTristate(enableDescriptorHeap, instance.options().enableDescriptorHeap);
 
@@ -846,10 +850,13 @@ namespace dxvk {
       ENABLE_FEATURE(core.features, wideLines, false),
 
       ENABLE_FEATURE(vk11, shaderDrawParameters, true),
+      ENABLE_FEATURE(vk11, storageBuffer16BitAccess, true),
       ENABLE_FEATURE(vk11, storagePushConstant16, false),
 
       ENABLE_FEATURE(vk12, bufferDeviceAddress, true),
       ENABLE_FEATURE(vk12, descriptorIndexing, true),
+      ENABLE_FEATURE(vk12, storageBuffer8BitAccess, true),
+      ENABLE_FEATURE(vk12, storagePushConstant8, false),
       ENABLE_FEATURE(vk12, shaderUniformTexelBufferArrayDynamicIndexing, false),
       ENABLE_FEATURE(vk12, shaderStorageTexelBufferArrayDynamicIndexing, false),
       ENABLE_FEATURE(vk12, shaderUniformBufferArrayNonUniformIndexing, false),
@@ -875,6 +882,7 @@ namespace dxvk {
       ENABLE_FEATURE(vk12, uniformBufferStandardLayout, true),
       ENABLE_FEATURE(vk12, vulkanMemoryModel, true),
 
+      ENABLE_FEATURE(vk13, inlineUniformBlock, true),
       ENABLE_FEATURE(vk13, computeFullSubgroups, true),
       ENABLE_FEATURE(vk13, dynamicRendering, true),
       ENABLE_FEATURE(vk13, maintenance4, true),
@@ -913,6 +921,9 @@ namespace dxvk {
 
       /* Descriptor heaps for a more efficient binding model */
       ENABLE_EXT_FEATURE(extDescriptorHeap, descriptorHeap, false),
+
+      /* Unused attachments to silence VVL around pipelines with rasterizer discard */
+      ENABLE_EXT_FEATURE(extDynamicRenderingUnusedAttachments, dynamicRenderingUnusedAttachments, false),
 
       /* Dynamic state to further improve the graphics_pipeline_library experience */
       ENABLE_EXT_FEATURE(extExtendedDynamicState3, extendedDynamicState3AlphaToCoverageEnable, false),

@@ -481,6 +481,24 @@ namespace dxvk {
 
 
   /**
+   * \brief Fast instance object
+   *
+   * Stores the pipeline handle, as well as the compile status. Can
+   * be accessed from multiple threads concurrently. A status of
+   * VK_NOT_READY indicates that pipeline compilation is still in
+   * progress on another thread.
+   */
+  struct DxvkGraphicsPipelineFastInstanceObject {
+    DxvkGraphicsPipelineFastInstanceObject() = default;
+    DxvkGraphicsPipelineFastInstanceObject(VkResult s, VkPipeline p)
+    : pipeline(p), status(s) { }
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    std::atomic<VkResult> status = { VK_NOT_READY };
+  };
+
+
+  /**
    * \brief Graphics pipeline
    * 
    * Stores the pipeline layout as well as methods to
@@ -634,7 +652,8 @@ namespace dxvk {
     dxvk::mutex                                   m_fastMutex;
     std::unordered_map<
       DxvkGraphicsPipelineFastInstanceKey,
-      VkPipeline, DxvkHash, DxvkEq>               m_fastPipelines;
+      DxvkGraphicsPipelineFastInstanceObject,
+      DxvkHash, DxvkEq> m_fastPipelines;
 
     DxvkGraphicsPipelineInstance* createInstance(
       const DxvkGraphicsPipelineStateInfo& state,
@@ -655,7 +674,7 @@ namespace dxvk {
     VkPipeline getOptimizedPipeline(
       const DxvkGraphicsPipelineStateInfo& state);
 
-    VkPipeline createOptimizedPipeline(
+    std::pair<VkResult, VkPipeline> createOptimizedPipeline(
       const DxvkGraphicsPipelineFastInstanceKey& key) const;
 
     void destroyBasePipelines();

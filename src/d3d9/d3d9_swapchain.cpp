@@ -1090,7 +1090,6 @@ namespace dxvk {
       if (m_latencyTracking)
         m_latencyHud = hud->addItem<hud::HudLatencyItem>("latency", 4);
 
-      hud->addItem<hud::HudFixedFunctionShaders>("ffshaders", -1, m_parent);
       hud->addItem<hud::HudSWVPState>("swvp", -1, m_parent);
 
 #ifdef D3D9_ALLOW_UNMAPPING

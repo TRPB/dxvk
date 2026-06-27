@@ -32,7 +32,7 @@ namespace dxvk {
 
   class DxvkIrShader;
   class DxvkIrShaderConverter;
-  class DxvkIrShaderCreateInfo;
+  struct DxvkIrShaderCreateInfo;
 
   /**
    * \brief Device performance hints
@@ -327,6 +327,14 @@ namespace dxvk {
      */
     bool hasCudaInterop() const {
       return m_features.nvxImageViewHandle;
+    }
+
+    /**
+     * \brief Queries set layout for spec constant data UBO
+     * \returns Legacy descriptor set layout for spec data
+     */
+    VkDescriptorSetLayout getSpecDataSetLayout() {
+      return m_objects.pipelineManager().getSpecDataSetLayout();
     }
 
     /**

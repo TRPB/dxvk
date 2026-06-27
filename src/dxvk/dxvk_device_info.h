@@ -67,6 +67,7 @@ namespace dxvk {
     VkPhysicalDeviceDepthBiasControlFeaturesEXT               extDepthBiasControl             = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT };
     VkPhysicalDeviceDescriptorBufferFeaturesEXT               extDescriptorBuffer             = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT };
     VkPhysicalDeviceDescriptorHeapFeaturesEXT                 extDescriptorHeap               = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT };
+    VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT extDynamicRenderingUnusedAttachments = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_FEATURES_EXT };
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT          extExtendedDynamicState3        = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT };
     VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT        extFragmentShaderInterlock      = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT };
     VkPhysicalDeviceFragmentShadingRateFeaturesKHR            khrFragmentShadingRate          = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR };
@@ -139,6 +140,7 @@ namespace dxvk {
     VkExtensionProperties extDepthBiasControl               = vk::makeExtension(VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME);
     VkExtensionProperties extDescriptorBuffer               = vk::makeExtension(VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
     VkExtensionProperties extDescriptorHeap                 = vk::makeExtension(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME);
+    VkExtensionProperties extDynamicRenderingUnusedAttachments = vk::makeExtension(VK_EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_EXTENSION_NAME);
     VkExtensionProperties extExtendedDynamicState3          = vk::makeExtension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
     VkExtensionProperties extFragmentShaderInterlock        = vk::makeExtension(VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME);
     VkExtensionProperties khrFragmentShadingRate            = vk::makeExtension(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);

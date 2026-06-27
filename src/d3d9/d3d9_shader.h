@@ -1,12 +1,8 @@
 #pragma once
 
-#include "../dxso/dxso_module.h"
-
 #include "../dxvk/dxvk_shader.h"
 #include "../dxvk/dxvk_shader_key.h"
-#ifndef DXSO
 #include "../dxvk/dxvk_shader_ir.h"
-#endif
 
 #include <sm3/sm3_parser.h>
 
@@ -20,8 +16,6 @@
 #include "d3d9_shader_analysis.h"
 
 namespace dxvk {
-
-#ifndef DXSO
 
   struct D3D9ShaderOptions {
     /** Whether the device is configured to do SWVP.
@@ -50,12 +44,6 @@ namespace dxvk {
     D3D9ShaderOptions shaderOptions;
   };
 
-#else
-
-  struct D3D9ShaderCreateInfo {};
-
-#endif
-
   /**
    * \brief Shader resource mapping
    *
@@ -63,48 +51,31 @@ namespace dxvk {
    * indices for D3D9 binding slots.
    */
   struct D3D9ShaderResourceMapping {
-    enum ConstantBuffers : uint32_t {
-      VSConstantBuffer = 0,
-      VSFloatConstantBuffer = 0,
-      VSIntConstantBuffer = 1,
-      VSBoolConstantBuffer = 2,
-      VSClipPlanes     = 3,
-      VSFixedFunction  = 4,
-      VSVertexBlendData = 5,
-      VSCount,
+    enum CbvIndex : uint32_t {
+      VSClipPlanes            = 0u,
+      VSFixedFunction         = 1u,
+      VSVertexBlendData       = 2u,
+      VSStaticConstants       = 3u,
+      VSDynamicConstants      = 4u,
+      PSShared                = 5u,
+      PSStaticConstants       = 6u,
 
-      PSConstantBuffer = 0,
-      PSFixedFunction  = 1,
-      PSShared         = 2,
-      PSCount
+      Count
     };
 
-    static constexpr uint32_t computeCbvBinding(D3D9ShaderType shaderType, uint32_t index) {
-      const uint32_t stageOffset = (ConstantBuffers::VSCount + caps::MaxTexturesVS) * computeStageIndex(shaderType);
-      return index + stageOffset;
-    }
-
     static constexpr uint32_t computeTextureBinding(D3D9ShaderType shaderType, uint32_t index) {
-      const uint32_t stageIndex = computeStageIndex(shaderType);
-      const uint32_t stageOffset = (ConstantBuffers::VSCount + caps::MaxTexturesVS) * stageIndex;
-      return index + stageOffset
-        + (stageIndex == 1u
-          ? ConstantBuffers::PSCount
-          : ConstantBuffers::VSCount);
+      auto base = (shaderType == D3D9ShaderType::VertexShader) ? FirstVSSamplerSlot : 0u;
+      return base + index;
     }
 
-    static constexpr uint32_t computeStageIndex(D3D9ShaderType shaderType) {
-      return uint32_t(shaderType);
+    static constexpr uint32_t getSwvpBufferIndex() {
+      return caps::MaxTextures;
     }
 
-    static constexpr uint32_t getSWVPBufferSlot() {
-      return ConstantBuffers::VSCount + caps::MaxTexturesVS + ConstantBuffers::PSCount + caps::MaxTexturesPS + 1; // From last pixel shader slot, above.
+    static constexpr std::pair<VkShaderStageFlags, uint32_t> getTextureSlotInfo(uint32_t index) {
+      // Sampler slot and binding indices match 1:1, see above
+      return std::make_pair(IsVSSampler(index) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT, index);
     }
-
-    static constexpr uint32_t getSpecConstantBufferSlot() {
-      return getSWVPBufferSlot() + 1;
-    }
-
   };
 
   /**
@@ -141,31 +112,19 @@ namespace dxvk {
     }
 
     const D3D9ShaderConstantsInfo& GetConstantsInfo() const { return m_analysis.GetConstantsInfo(); }
-    const D3D9ImmediateConstants& GetImmediateConstants() const { return m_analysis.GetImmediateConstants(); }
+    const D3D9ImmediateConstantsInfo& GetImmediateConstants() const { return m_analysis.GetImmediateConstants(); }
+
+    const D3D9ConstantBufferCopy* GetConstantLayout() const {
+      return m_analysis.GetConstantLayout();
+    }
 
     D3D9ShaderMasks GetShaderMask() const { return D3D9ShaderMasks{ m_analysis.GetSamplerMask(), m_analysis.GetRenderTargetMask() }; }
 
     dxbc_spv::sm3::ShaderInfo GetInfo() const { return m_analysis.GetShaderInfo(); }
 
-    VkImageViewType GetImageViewType(uint32_t samplerSlot) const { return m_analysis.GetImageViewType(samplerSlot); }
-
   private:
 
-    void CreateIrShader(
-            D3D9DeviceEx*           pDevice,
-      const DxvkShaderHash&         ShaderKey,
-      const D3D9ShaderCreateInfo&   ModuleInfo,
-      const void*                   pShaderBytecode,
-            size_t                  BytecodeLength);
-
-    void CreateLegacyShader(
-            D3D9DeviceEx*         pDevice,
-      const DxvkShaderHash&       ShaderKey,
-      const D3D9ShaderCreateInfo& ModuleInfo,
-      const void*                 pShaderBytecode);
-
     D3D9ShaderAnalysis    m_analysis;
-
     Rc<DxvkShader>        m_shader;
 
   };

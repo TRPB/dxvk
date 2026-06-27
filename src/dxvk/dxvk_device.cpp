@@ -776,13 +776,11 @@ namespace dxvk {
     m_shaderOptions.minStorageBufferAlignment =
       m_properties.core.properties.limits.minStorageBufferOffsetAlignment;
 
-    if (m_features.core.features.shaderInt16 && m_features.vk12.shaderFloat16)
+    if (m_features.vk12.shaderFloat16)
       m_shaderOptions.flags.set(DxvkShaderCompileFlag::Supports16BitArithmetic);
 
-    // RADV currently does not emit great code with 16-bit sampler indices
-    if (m_features.core.features.shaderInt16 && m_features.vk11.storagePushConstant16
-     && !m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV))
-      m_shaderOptions.flags.set(DxvkShaderCompileFlag::Supports16BitPushData);
+    if (m_features.vk11.storagePushConstant16 && m_features.vk12.storagePushConstant8)
+      m_shaderOptions.flags.set(DxvkShaderCompileFlag::SupportsSubDwordPushData);
 
     // Need to tag typed storage image loads with the format on some devices
     auto r32Features = getFormatFeatures(VK_FORMAT_R32_SFLOAT).optimal
@@ -807,6 +805,12 @@ namespace dxvk {
         DxvkShaderCompileFlag::LowerFtoI,
         DxvkShaderCompileFlag::LowerF32toF16);
     }
+
+    // On AMD, push constant BDA will not be worse than going through a descriptor
+    if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV)
+     || m_adapter->matchesDriver(VK_DRIVER_ID_AMD_OPEN_SOURCE)
+     || m_adapter->matchesDriver(VK_DRIVER_ID_AMD_PROPRIETARY))
+      m_shaderOptions.flags.set(DxvkShaderCompileFlag::LowerInBoundsCbvToBda);
 
     // Converting unsigned integers to float should return an unsigned float,
     // but Nvidia drivers prior to 580 don't agree
@@ -881,6 +885,9 @@ namespace dxvk {
 
     if (m_features.khrShaderFloatControls2.shaderFloatControls2)
       m_shaderOptions.spirv.set(DxvkShaderSpirvFlag::SupportsFloatControls2);
+
+    if (canUseDescriptorHeap())
+      m_shaderOptions.spirv.set(DxvkShaderSpirvFlag::SupportsDescriptorHeap);
 
     // Set up resource indexing flags
     if (m_features.core.features.shaderUniformBufferArrayDynamicIndexing &&

@@ -49,6 +49,7 @@ namespace dxvk {
     GpDirtySampleLocations,     ///< Sample locations have changed
     GpDirtyViewport,            ///< Viewport state has changed
     GpDirtySpecConstants,       ///< Graphics spec constants are out of date
+    GpDirtySpecDataBlock,       ///< Spec constant fallback data is out of date
     GpDynamicBlendConstants,    ///< Blend constants are dynamic
     GpDynamicDepthBias,         ///< Depth bias is dynamic
     GpDynamicDepthBounds,       ///< Depth bounds are dynamic
@@ -59,6 +60,7 @@ namespace dxvk {
     GpDynamicRasterizerState,   ///< Cull mode and front face are dynamic
     GpDynamicSampleLocations,   ///< Sample locations are dynamic
     GpDynamicVertexStrides,     ///< Vertex buffer strides are dynamic
+    GpDynamicViewport,          ///< Viewport state is dynamic. Disabled for rasterizer discard.
     GpHasPushData,              ///< Graphics pipeline uses push data
     GpIndependentSets,          ///< Graphics pipeline layout was created with independent sets
 

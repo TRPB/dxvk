@@ -42,7 +42,8 @@ namespace dxvk {
     this->hideAmdGpu                    = config.getOption<Tristate>    ("d3d9.hideAmdGpu",                    Tristate::Auto) == Tristate::True;
     this->hideIntelGpu                  = config.getOption<Tristate>    ("d3d9.hideIntelGpu",                  Tristate::True) == Tristate::True;
     this->maxFrameLatency               = config.getOption<int32_t>     ("d3d9.maxFrameLatency",               0);
-    this->maxFrameRate                  = config.getOption<int32_t>     ("d3d9.maxFrameRate",                  0);
+    this->maxFrameRate                  = config.getOption<int32_t>     ("dxvk.maxFrameRate",
+                                          config.getOption<int32_t>     ("d3d9.maxFrameRate",                  0));
     this->presentInterval               = config.getOption<int32_t>     ("d3d9.presentInterval",               -1);
     this->shaderModel                   = config.getOption<int32_t>     ("d3d9.shaderModel",                   3u);
     this->dpiAware                      = config.getOption<bool>        ("d3d9.dpiAware",                      true);
@@ -50,6 +51,7 @@ namespace dxvk {
     this->deferSurfaceCreation          = config.getOption<bool>        ("d3d9.deferSurfaceCreation",          false);
     this->samplerAnisotropy             = config.getOption<int32_t>     ("d3d9.samplerAnisotropy",             -1);
     this->maxAvailableMemory            = config.getOption<int32_t>     ("d3d9.maxAvailableMemory",            4096);
+    this->supportCubeDepthFormats       = config.getOption<bool>        ("d3d9.supportCubeDepthFormats",       false);
     this->supportDFFormats              = config.getOption<bool>        ("d3d9.supportDFFormats",              true);
     this->supportX4R4G4B4               = config.getOption<bool>        ("d3d9.supportX4R4G4B4",               true);
     this->useD32forD24                  = config.getOption<bool>        ("d3d9.useD32forD24",                  false);
@@ -64,7 +66,7 @@ namespace dxvk {
     this->allowDiscard                  = config.getOption<bool>        ("d3d9.allowDiscard",                  true);
     this->enumerateByDisplays           = config.getOption<bool>        ("d3d9.enumerateByDisplays",           true);
     this->cachedWriteOnlyBuffers        = config.getOption<bool>        ("d3d9.cachedWriteOnlyBuffers",          false);
-    this->deviceLocalConstantBuffers    = config.getOption<bool>        ("d3d9.deviceLocalConstantBuffers",    false);
+    this->deviceLocalConstantBuffers    = config.getOption<Tristate>    ("d3d9.deviceLocalConstantBuffers",    Tristate::Auto);
     this->allowDirectBufferMapping      = config.getOption<bool>        ("d3d9.allowDirectBufferMapping",      true);
     this->forceDrawTimeBufferUpload     = config.getOption<bool>        ("d3d9.forceDrawTimeBufferUpload",     false);
     this->seamlessCubes                 = config.getOption<bool>        ("d3d9.seamlessCubes",                 false);
@@ -75,15 +77,12 @@ namespace dxvk {
     this->countLosableResources         = config.getOption<bool>        ("d3d9.countLosableResources",         true);
     this->reproducibleCommandStream     = config.getOption<bool>        ("d3d9.reproducibleCommandStream",     false);
     this->extraFrontbuffer              = config.getOption<bool>        ("d3d9.extraFrontbuffer",              false);
-    this->ffUbershaderVS                = config.getOption<bool>        ("d3d9.ffUbershaderVS",                true);
-    this->ffUbershaderFS                = config.getOption<bool>        ("d3d9.ffUbershaderFS",                true);
-    this->useDxbcSpirv                  = config.getOption<bool>        ("d3d9.useDxbcSpirv",                  false);
 
     // D3D8 options
-    this->drefScaling                   = config.getOption<int32_t>     ("d3d8.scaleDref",                     0);
+    this->drefScaling = config.getOption<int32_t>("d3d8.scaleDref", 0);
 
     // Clamp the shader model value between 0 and 3
-    this->shaderModel    = dxvk::clamp(this->shaderModel, 0u, 3u);
+    this->shaderModel = dxvk::clamp(this->shaderModel, 0u, 3u);
     // Clamp LOD bias so that people don't abuse this in unintended ways
     this->samplerLodBias = dxvk::fclamp(this->samplerLodBias, -2.0f, 1.0f);
 
@@ -103,7 +102,7 @@ namespace dxvk {
       this->d3d9FloatEmulation = hasMulz ? D3D9FloatEmulation::Strict : D3D9FloatEmulation::Enabled;
     }
 
-    Tristate useFP16 = config.getOption<Tristate>("d3d9.useFP16", Tristate::Auto);
+    Tristate useFP16 = config.getOption<Tristate>("d3d9.useFP16", Tristate::False);
     if (useFP16 == Tristate::Auto) {
       this->useFP16 = !hasMulz;
     } else {

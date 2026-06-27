@@ -311,31 +311,32 @@ namespace dxvk {
     // d3d9 alpha-test gate, opt-in via dxvk.particleSkipAlphaTested.
     //
     // The d3d9 frontend stores the active VkCompareOp for alpha-test
-    // in SpecAlphaCompareOp (dword 1, bits 21..23 — see
-    // src/d3d9/d3d9_spec_constants.h). When alpha-test is disabled it
-    // writes VK_COMPARE_OP_ALWAYS. An op other than ALWAYS means the
-    // pipeline is alpha-tested — which could be either a foliage
-    // cutout (WoW 3.3.5a grass: alpha-test for the hard edge + alpha-
-    // blend for soft fringe, writes depth) or a soft particle with
-    // a "discard fully transparent" optimization (Freelancer 2003
-    // smoke: alpha-test discards alpha==0 pixels, does not write
-    // depth). The two are indistinguishable from static state
-    // because depth-write is dynamic state in this codebase.
+    // in D3D9SpecData::alphaTest bits 0..3 (spec constant dword 0,
+    // bits 0..3 — see src/d3d9/d3d9_state.h D3D9SpecData). When
+    // alpha-test is disabled it writes VK_COMPARE_OP_ALWAYS. An op
+    // other than ALWAYS means the pipeline is alpha-tested — which
+    // could be either a foliage cutout (WoW 3.3.5a grass: alpha-test
+    // for the hard edge + alpha-blend for soft fringe, writes depth)
+    // or a soft particle with a "discard fully transparent"
+    // optimization (Freelancer 2003 smoke: alpha-test discards
+    // alpha==0 pixels, does not write depth). The two are
+    // indistinguishable from static state because depth-write is
+    // dynamic state in this codebase.
     //
     // Default (skip=false) excludes alpha-tested pipelines so foliage
     // stays on per-sample shading. Games whose smoke uses the
     // discard-transparent pattern set skip=true to opt those in.
     //
-    // dword 1 reads as 0 when the FS doesn't reference any dword-1
+    // dword 0 reads as 0 when the FS doesn't reference any dword-0
     // spec constants (always on d3d11, sometimes on d3d9). Treated
     // as "no signal" — fall through to the DS+MSAA gate regardless
     // of this option.
     bool includeAlphaTested = device->config().particleSkipAlphaTested;
     bool alphaTestActive = false;
     if (!includeAlphaTested) {
-      uint32_t specDword1 = state.sc.specConstants[1];
-      uint32_t alphaCmp = (specDword1 >> 21) & 0x7u;
-      alphaTestActive = specDword1 != 0u
+      uint32_t specDword0 = state.sc.specConstants[0];
+      uint32_t alphaCmp = specDword0 & 0xfu;
+      alphaTestActive = specDword0 != 0u
                      && alphaCmp != uint32_t(VK_COMPARE_OP_ALWAYS);
     }
 

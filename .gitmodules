@@ -13,4 +13,4 @@
 	branch = windows
 [submodule "subprojects/dxbc-spirv"]
 	path = subprojects/dxbc-spirv
-	url = https://github.com/doitsujin/dxbc-spirv.git
+	url = https://github.com/TRPB/dxbc-spirv.git

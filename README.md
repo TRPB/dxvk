@@ -38,20 +38,28 @@ This project was heavily AI assisted. It is designed to solve a very specific pr
 
 ### Relevant DXVK options for dxvk.conf
 
-`d3d9.forceSampleRateShading = true` - Enable this to force sample rate shading in d3d9 games (this option exists in upstream DXVK but is off by default and needed for these tweaks to work) 
-`d3d11.forceSampleRateShading = true` - Enable this to force sample rate shading in d3d11 games (this option exists in upstream DXVK but is off by default and needed for these tweaks to work) 
+First enable supersampling — these options exist in upstream DXVK but are off by default:
 
-Set the MSAA option in game to set the supersampling rate, MSAA will be replaced with SSAA.
+```
+d3d9.forceSampleRateShading = true
+d3d11.forceSampleRateShading = true
+```
 
-These new options have been added:
+Set the MSAA option in-game to choose the supersampling rate; MSAA is replaced with SSAA. If the game has no in-game MSAA setting, force it via `d3d9.forceSwapchainMSAA = 8` (or 2/4/8 for 2×/4×/8× supersampling).
 
-- `dxvk.transparentSkipSampleShading = true` *(default)* - Disables sample rate shading for transpacency/glow effects. Should be impossible to notice but can remove framerate drops entirely in glow heavy scenes
-- `dxvk.transparentShadingRate = 1x1` *(default: 1x1 which is standard rendering behaviour identical to stock DXVK)* - Allows setting a different shading rate for glow effects, can improve performance in glow heavy scenes by a large amount (4x on the glow effects themeselves) but can also introduce visual artifacts on small glow effects distant from the camera. Available options: 2x2 (best performance), 1x2, 2x1. Recommended to start with 2x2 and then turn it down or off if you notice issues. Depending on screen resolution, game engine and upscaling settings may not have any visual impact at all but hugely improve performance.
-- `dxvk.transparentMipBias = 0.0` *(default, disabled)* - Leave at zero if `transparentShadingRate` is 1x1 (off).
-- `dxvk.particleSkipSampleShading = false` *(default, disabled)* - Same idea as `transparentSkipSampleShading` but applied to soft-alpha particles. Turn on if smoke effects tank your framerate.
-- `dxvk.particleShadingRate = 1x1` *(default, disabled)* - Same as `transparentShadingRate` but for soft-alpha particles. Smoke artifacts at 2x2 look different from glow artifacts — recommended to start with `2x1` or `1x2` before trying `2x2`. Same opt-in caveats as the skip-sample-shading option.
-- `dxvk.particleMipBias = 0.0` *(default, disabled)* - Same as `transparentMipBias` but for soft-alpha particles. Leave at zero if `particleShadingRate` is 1x1.
-- `dxvk.particleSkipAlphaTested = false` *(default, disabled)* - Enabling this also enables sample rate shading for alpha tested pipelines. This is entirely game/game engine dependent. It will generally help performance with smoke/fog effects but it can also disable sample rate shading for foliage/leaves. Turning on will help performance but may need to be turned off if foliage looks bad.
+These new options are added by this fork:
+
+| Option | Default | Description |
+|---|---|---|
+| `d3d9.forceSwapchainMSAA` | `-1` | Forces an MSAA sample count on the D3D9 swapchain regardless of what the game requests. `-1` means no override. Set to `2`, `4`, or `8` to force 2×, 4×, or 8× supersampling on games that have no in-game MSAA option. |
+| `d3d9.forceSampleRateShading` | `false` | Forces sample rate shading in D3D9 games, converting MSAA to SSAA (supersampling). Requires MSAA to be active (either in-game or via `forceSwapchainMSAA`). |
+| `dxvk.transparentSkipSampleShading` | `true` | Disables per-sample shading on additive/multiplicative blend pipelines (glow, fire). Visually undetectable but eliminates framerate drops in glow-heavy scenes. |
+| `dxvk.transparentShadingRate` | `1x1` | Variable Rate Shading rate for additive/multiplicative blend effects. `2x2` gives 4× fewer fragment invocations on glow draws at the cost of some blockiness on small distant effects. Options: `1x1` (off), `2x1`, `1x2`, `2x2`. Start with `2x2` and reduce if you see artifacts. |
+| `dxvk.transparentMipBias` | `0.0` | Mip-LOD bias added to texture samples in glow/fire shaders. Pre-blurs textures to soften VRS block-boundary aliasing. Leave at `0.0` if `transparentShadingRate` is `1x1`. Typical range: `0.5`–`3.0`. |
+| `dxvk.particleSkipSampleShading` | `false` | Same as `transparentSkipSampleShading` but for soft-alpha particle pipelines (smoke, dust, light shafts). Off by default — opt-in, as the particle classifier is heuristic. |
+| `dxvk.particleShadingRate` | `1x1` | Same as `transparentShadingRate` but for soft-alpha particles. Smoke artifacts at `2x2` are visually distinct from glow artifacts — try `2x1` or `1x2` first. |
+| `dxvk.particleMipBias` | `0.0` | Same as `transparentMipBias` but for soft-alpha particles. Leave at `0.0` if `particleShadingRate` is `1x1`. |
+| `dxvk.particleSkipAlphaTested` | `false` | Extends particle optimizations to alpha-tested pipelines. Useful for D3D9 games where smoke/dust uses alpha-test as a discard-transparent shortcut (e.g. Freelancer). Disable if foliage or cutout edges look aliased. |
 
 # Installation
 

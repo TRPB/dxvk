@@ -45,6 +45,7 @@ namespace dxvk {
     HANDLE_EXT(extSwapchainMaintenance1);          \
     HANDLE_EXT(extTransformFeedback);              \
     HANDLE_EXT(extVertexAttributeDivisor);         \
+    HANDLE_EXT(khrDeviceFault);                    \
     HANDLE_EXT(khrDynamicRenderingLocalRead);      \
     HANDLE_EXT(khrExternalMemoryWin32);            \
     HANDLE_EXT(khrExternalSemaphoreWin32);         \
@@ -69,6 +70,8 @@ namespace dxvk {
     HANDLE_EXT(khrSwapchainMutableFormat);         \
     HANDLE_EXT(khrUnifiedImageLayouts);            \
     HANDLE_EXT(khrWin32KeyedMutex);                \
+    HANDLE_EXT(amdBufferMarker);                   \
+    HANDLE_EXT(nvDeviceDiagnosticCheckpoints);     \
     HANDLE_EXT(nvLowLatency2);                     \
     HANDLE_EXT(nvRawAccessChains);                 \
     HANDLE_EXT(nvxBinaryImport);                   \
@@ -88,6 +91,7 @@ namespace dxvk {
     HANDLE_EXT(extSampleLocations);                \
     HANDLE_EXT(extTransformFeedback);              \
     HANDLE_EXT(extVertexAttributeDivisor);         \
+    HANDLE_EXT(khrDeviceFault);                    \
     HANDLE_EXT(khrMaintenance5);                   \
     HANDLE_EXT(khrMaintenance6);                   \
     HANDLE_EXT(khrMaintenance7);                   \
@@ -527,6 +531,11 @@ namespace dxvk {
        || m_properties.vk12.driverID == VK_DRIVER_ID_AMD_PROPRIETARY)
         enableDescriptorBuffer = !m_hasFmask;
 
+      // Workaround for https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15795.
+      // Does not affect Battlemage, and EDB generally costs perf on Intel.
+      if (m_properties.vk12.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
+        enableDescriptorBuffer = m_properties.vk13.minSubgroupSize < 16u;
+
       applyTristate(enableDescriptorBuffer, instance.options().enableDescriptorBuffer);
 
       if (!enableDescriptorBuffer)
@@ -537,7 +546,7 @@ namespace dxvk {
     if (!instance.options().enableUnifiedImageLayout)
       m_featuresSupported.khrUnifiedImageLayouts.unifiedImageLayouts = VK_FALSE;
 
-    if (env::is32BitHostPlatform() || safeMode) {
+    if (env::is32BitHostPlatform() || !env::isWineVulkan() || safeMode) {
       // CUDA interop is unnecessary on 32-bit, no games use it. These extensions
       // can also cause device creation errors for unknown reasons.
       m_featuresSupported.nvxBinaryImport = VK_FALSE;
@@ -589,6 +598,10 @@ namespace dxvk {
       m_featuresSupported.extLineRasterization.smoothLines = VK_FALSE;
     }
 
+    // Apply raw access chain option
+    if (!instance.options().enableNvRawAccessChains)
+      m_featuresSupported.nvRawAccessChains.shaderRawAccessChains = VK_FALSE;
+
     // Ensure we only enable one of present_id or present_id_2. Prefer the
     // older versions of the present_id/wait extensions since the newer ones
     // cause issues with external layers and apparently some Wayland setups
@@ -606,6 +619,15 @@ namespace dxvk {
     if (!m_featuresSupported.khrPresentId.presentId
      && !m_featuresSupported.khrPresentId2.presentId2)
       m_featuresSupported.nvLowLatency2 = VK_FALSE;
+
+    // Disable debug extensions if hang debugging is disabled
+    if (!instance.debugFlags().test(DxvkDebugFlag::Hang)) {
+      m_featuresSupported.khrDeviceFault.deviceFault = VK_FALSE;
+      m_featuresSupported.khrDeviceFault.deviceFaultVendorBinary = VK_FALSE;
+
+      m_featuresSupported.amdBufferMarker = VK_FALSE;
+      m_featuresSupported.nvDeviceDiagnosticCheckpoints = VK_FALSE;
+    }
   }
 
 
@@ -998,6 +1020,10 @@ namespace dxvk {
       ENABLE_EXT_FEATURE(extVertexAttributeDivisor, vertexAttributeInstanceRateDivisor, false),
       ENABLE_EXT_FEATURE(extVertexAttributeDivisor, vertexAttributeInstanceRateZeroDivisor, false),
 
+      /* Hang debugging */
+      ENABLE_EXT_FEATURE(khrDeviceFault, deviceFault, false),
+      ENABLE_EXT_FEATURE(khrDeviceFault, deviceFaultVendorBinary, false),
+
       /* Tiler stuff */
       ENABLE_EXT_FEATURE(khrDynamicRenderingLocalRead, dynamicRenderingLocalRead, false),
 
@@ -1051,6 +1077,12 @@ namespace dxvk {
 
       /* Keyed mutex support in wine */
       ENABLE_EXT(khrWin32KeyedMutex, false),
+
+      /* Hang debugging on AMD */
+      ENABLE_EXT(amdBufferMarker, false),
+
+      /* Hang debugging on Nvidia */
+      ENABLE_EXT(nvDeviceDiagnosticCheckpoints, false),
 
       /* Reflex support */
       ENABLE_EXT(nvLowLatency2, false),

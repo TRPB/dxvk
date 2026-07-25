@@ -33,6 +33,9 @@ namespace dxvk {
       m_features.set(DxvkContextFeature::DescriptorBuffer);
     } else {
       m_descriptorPool = new DxvkDescriptorPool(device.ptr());
+
+      if (m_device->config().enableDescriptorUpdateTemplates)
+        m_features.set(DxvkContextFeature::DescriptorTemplates);
     }
 
     // Init framebuffer info with default render pass in case
@@ -842,6 +845,9 @@ namespace dxvk {
           VkDeviceSize      offset) {
     auto argInfo = m_state.id.argBuffer.getSliceInfo();
 
+    if (unlikely(offset + sizeof(VkDispatchIndirectCommand) > argInfo.size))
+      return;
+
     if (this->commitComputeState<true>()) {
       m_queryManager.beginQueries(m_cmd,
         VK_QUERY_TYPE_PIPELINE_STATISTICS);
@@ -853,7 +859,7 @@ namespace dxvk {
       m_queryManager.endQueries(m_cmd,
         VK_QUERY_TYPE_PIPELINE_STATISTICS);
 
-      accessDrawBuffer(offset, 1, 0, sizeof(VkDispatchIndirectCommand));
+      accessDrawBuffer(offset, sizeof(VkDispatchIndirectCommand));
 
       this->trackDrawBuffer();
     }
@@ -1696,13 +1702,19 @@ namespace dxvk {
           uint32_t                  count,
           uint32_t                  stride,
           bool                      unroll) {
-    constexpr VkDeviceSize elementSize = Indexed
+    constexpr VkDeviceSize ElementSize = Indexed
       ? sizeof(VkDrawIndexedIndirectCommand)
       : sizeof(VkDrawIndirectCommand);
 
-    if (this->commitGraphicsState<Indexed, true>()) {
-      auto argInfo = m_state.id.argBuffer.getSliceInfo();
+    VkDeviceSize argSize = 0u;
 
+    auto argInfo = m_state.id.argBuffer.getSliceInfo();
+    std::tie(count, argSize) = computeDrawCount(count, argInfo.size, offset, stride, ElementSize);
+
+    if (unlikely(!count))
+      return;
+
+    if (this->commitGraphicsState<Indexed, true>()) {
       if (likely(count == 1u || !unroll || !needsDrawBarriers())) {
         if (Indexed) {
           m_cmd->cmdDrawIndexedIndirect(argInfo.buffer,
@@ -1722,7 +1734,7 @@ namespace dxvk {
 
         if (m_flags.test(DxvkContextFlag::GpRenderPassUnsynchronized)
          || m_state.id.argBuffer.buffer()->hasGfxStores())
-          accessDrawBuffer(offset, count, stride, elementSize);
+          accessDrawBuffer(offset, argSize);
       } else {
         // If the pipeline has order-sensitive stores, submit one
         // draw at a time and insert barriers in between.
@@ -1740,7 +1752,7 @@ namespace dxvk {
 
           if (m_flags.test(DxvkContextFlag::GpRenderPassUnsynchronized)
            || m_state.id.argBuffer.buffer()->hasGfxStores())
-            accessDrawBuffer(offset, 1u, stride, elementSize);
+            accessDrawBuffer(offset, ElementSize);
 
           offset += stride;
         }
@@ -1757,10 +1769,21 @@ namespace dxvk {
           VkDeviceSize          countOffset,
           uint32_t              maxCount,
           uint32_t              stride) {
-    if (this->commitGraphicsState<Indexed, true>()) {
-      auto argInfo = m_state.id.argBuffer.getSliceInfo();
-      auto cntInfo = m_state.id.cntBuffer.getSliceInfo();
+    constexpr VkDeviceSize ElementSize = Indexed
+      ? sizeof(VkDrawIndexedIndirectCommand)
+      : sizeof(VkDrawIndirectCommand);
 
+    VkDeviceSize argSize = 0u;
+
+    auto argInfo = m_state.id.argBuffer.getSliceInfo();
+    auto cntInfo = m_state.id.cntBuffer.getSliceInfo();
+
+    std::tie(maxCount, argSize) = computeDrawCount(maxCount, argInfo.size, offset, stride, ElementSize);
+
+    if (unlikely(!maxCount || countOffset + sizeof(uint32_t) > cntInfo.size))
+      return;
+
+    if (this->commitGraphicsState<Indexed, true>()) {
       if (Indexed) {
         m_cmd->cmdDrawIndexedIndirectCount(
           argInfo.buffer, argInfo.offset + offset,
@@ -1776,16 +1799,34 @@ namespace dxvk {
       m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1u);
 
       if (m_flags.test(DxvkContextFlag::GpRenderPassUnsynchronized)
-       || m_state.id.argBuffer.buffer()->hasGfxStores()) {
-        accessDrawBuffer(offset, maxCount, stride, Indexed
-          ? sizeof(VkDrawIndexedIndirectCommand)
-          : sizeof(VkDrawIndirectCommand));
-      }
+       || m_state.id.argBuffer.buffer()->hasGfxStores())
+        accessDrawBuffer(offset, argSize);
 
       if (m_flags.test(DxvkContextFlag::GpRenderPassUnsynchronized)
        || m_state.id.cntBuffer.buffer()->hasGfxStores())
         accessDrawCountBuffer(countOffset);
     }
+  }
+
+
+  std::pair<uint32_t, VkDeviceSize> DxvkContext::computeDrawCount(
+          uint32_t              count,
+          VkDeviceSize          bufferSize,
+          VkDeviceSize          argOffset,
+          VkDeviceSize          argStride,
+          VkDeviceSize          argSize) {
+    if (unlikely(!count || bufferSize < argOffset + argSize))
+      return std::make_pair(0u, 0u);
+
+    VkDeviceSize accessSize = (count - 1u) * argStride + argSize;
+    VkDeviceSize remainingSize = bufferSize - argOffset;
+
+    if (unlikely(remainingSize < accessSize)) {
+      count = 1u + uint32_t((remainingSize - argSize) / argStride);
+      accessSize = (count - 1u) * argStride + argSize;
+    }
+
+    return std::make_pair(count, accessSize);
   }
 
 
@@ -6425,14 +6466,11 @@ namespace dxvk {
     // them to enable MSAA resolve attachments. Also ignore render passes with only
     // one color attachment here since those tend to only have a small number of
     // draws and we are almost certainly going to use the output anyway.
-    bool useSecondaryCmdBuffer = !m_device->perfHints().preferPrimaryCmdBufs
-      && renderingInheritance.rasterizationSamples > VK_SAMPLE_COUNT_1_BIT;
+    bool useSecondaryCmdBuffer = false;
 
     if (m_device->perfHints().preferRenderPassOps) {
-      useSecondaryCmdBuffer = renderingInheritance.rasterizationSamples > VK_SAMPLE_COUNT_1_BIT;
-
-      if (!m_device->perfHints().preferPrimaryCmdBufs)
-        useSecondaryCmdBuffer |= depthStencilAspects || colorInfoCount > 1u || !hasMipmappedRt;
+      useSecondaryCmdBuffer = renderingInheritance.rasterizationSamples > VK_SAMPLE_COUNT_1_BIT
+                           || depthStencilAspects || colorInfoCount > 1u || !hasMipmappedRt;
     }
 
     if (useSecondaryCmdBuffer) {
@@ -6980,11 +7018,6 @@ namespace dxvk {
     uint32_t dirtySetMask = layout->getDirtySetMask(pipelineLayoutType, m_descriptorState);
 
     if (likely(dirtySetMask)) {
-      // On 32-bit wine, vkUpdateDescriptorSets has significant overhead due
-      // to struct conversion, so we should use descriptor update templates.
-      // For 64-bit applications, using templates is slower on some drivers.
-      constexpr bool useDescriptorTemplates = env::is32BitHostPlatform();
-
       std::array<VkDescriptorSet, DxvkDescriptorSets::SetCount> sets = { };
       m_descriptorPool->alloc(m_trackingId, pipelineLayout, dirtySetMask, sets.data());
 
@@ -6996,7 +7029,7 @@ namespace dxvk {
         for (uint32_t j = 0; j < range.bindingCount; j++) {
           const auto& binding = range.bindings[j];
 
-          if (!useDescriptorTemplates) {
+          if (!m_features.test(DxvkContextFeature::DescriptorTemplates)) {
             auto& descriptorWrite = m_legacyDescriptors.writes[descriptorCount];
             descriptorWrite.dstSet = sets[setIndex];
             descriptorWrite.dstBinding = binding.getBinding();
@@ -7144,7 +7177,7 @@ namespace dxvk {
           }
         }
 
-        if (useDescriptorTemplates) {
+        if (m_features.test(DxvkContextFeature::DescriptorTemplates)) {
           m_cmd->updateDescriptorSetWithTemplate(sets[setIndex],
             pipelineLayout->getDescriptorSetLayout(setIndex)->getSetUpdateTemplate(),
             m_legacyDescriptors.infos.data());
@@ -7153,7 +7186,7 @@ namespace dxvk {
       }
 
       // Update all descriptors in one go to avoid API call overhead
-      if (!useDescriptorTemplates) {
+      if (!m_features.test(DxvkContextFeature::DescriptorTemplates)) {
         m_cmd->updateDescriptorSets(descriptorCount,
           m_legacyDescriptors.writes.data());
       }
@@ -7183,16 +7216,21 @@ namespace dxvk {
 
     if (BindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS
      && unlikely(m_flags.all(DxvkContextFlag::GpIndependentSets, DxvkContextFlag::GpDirtySpecDataBlock))) {
+      DxvkResourceBufferInfo specData = allocateSpecDataBuffer(pipelineLayout);
+      pipelineLayout->writeSpecData(specData.mapPtr, m_state.gp.state.sc.specConstants);
+
       VkDescriptorSet set = m_descriptorPool->alloc(m_trackingId, m_device->getSpecDataSetLayout());
 
-      VkWriteDescriptorSetInlineUniformBlock blockInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK };
-      blockInfo.dataSize = sizeof(DxvkScInfo);
-      blockInfo.pData = m_state.gp.state.sc.specConstants;
+      VkDescriptorBufferInfo bufferInfo = {};
+      bufferInfo.buffer = specData.buffer;
+      bufferInfo.offset = specData.offset;
+      bufferInfo.range = specData.size;
 
-      VkWriteDescriptorSet writeInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &blockInfo };
+      VkWriteDescriptorSet writeInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
       writeInfo.dstSet = set;
-      writeInfo.descriptorCount = blockInfo.dataSize;
-      writeInfo.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+      writeInfo.descriptorCount = 1u;
+      writeInfo.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+      writeInfo.pBufferInfo = &bufferInfo;
 
       m_cmd->updateDescriptorSets(1u, &writeInfo);
 
@@ -9128,6 +9166,28 @@ namespace dxvk {
   }
 
 
+  DxvkResourceBufferInfo DxvkContext::allocateSpecDataBuffer(const DxvkPipelineLayout* layout) {
+    if (unlikely(!m_specBuffer)) {
+      DxvkBufferCreateInfo bufInfo;
+      bufInfo.size    = layout->getSpecDataMemorySize();
+      bufInfo.usage   = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+      bufInfo.stages  = m_device->getShaderPipelineStages();
+      bufInfo.access  = VK_ACCESS_2_UNIFORM_READ_BIT;
+      bufInfo.debugName = "Spec data buffer";
+
+      m_specBuffer = m_device->createBuffer(bufInfo,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    } else {
+      m_cmd->track(m_specBuffer->assignStorage(m_specBuffer->allocateStorage()));
+    }
+
+    m_cmd->track(m_specBuffer, DxvkAccess::Write);
+    return m_specBuffer->getSliceInfo();
+  }
+
+
   void DxvkContext::freeZeroBuffer() {
     constexpr uint64_t ZeroBufferLifetime = 4096u;
 
@@ -10254,14 +10314,10 @@ namespace dxvk {
 
   void DxvkContext::accessDrawBuffer(
           VkDeviceSize              offset,
-          uint32_t                  count,
-          uint32_t                  stride,
-          uint32_t                  size) {
-    uint32_t dataSize = count ? (count - 1u) * stride + size : 0u;
-
+          VkDeviceSize              size) {
     accessBuffer(DxvkCmdBuffer::ExecBuffer,
       *m_state.id.argBuffer.buffer(),
-      m_state.id.argBuffer.offset() + offset, dataSize,
+      m_state.id.argBuffer.offset() + offset, size,
       VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
       VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT_KHR,
       DxvkAccessOp::None);

@@ -2,17 +2,52 @@ name: Artifacts (Package)
 
 on: [push, pull_request, workflow_dispatch]
 
+env:
+  # Revision of this fork, appended to the upstream DXVK build number
+  # read from ./RELEASE. Bump this for every new release cut against the
+  # same upstream base; it goes back to 1 when ./RELEASE changes.
+  DXVK_FORK_REVISION: 1
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+
+    outputs:
+      name: ${{ steps.get-version.outputs.name }}
+
+    steps:
+    - name: Checkout code
+      id: checkout-code
+      uses: actions/checkout@v6
+
+    - name: Get version
+      id: get-version
+      shell: bash
+      run: |
+        # Releases are named after the upstream build number plus this
+        # fork's revision, e.g. upstream 3.1.1 + revision 1 -> 3.1.1.1.
+        # Everything else keeps the branch-and-commit name so that dev
+        # artifacts stay traceable to the commit they were built from.
+        if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          echo "name=$(cat RELEASE).${DXVK_FORK_REVISION}" >> $GITHUB_OUTPUT
+        else
+          echo "name=${GITHUB_REF##*/}-${GITHUB_SHA##*/}" >> $GITHUB_OUTPUT
+        fi
+
   artifacts-mingw-w64:
     runs-on: ubuntu-latest
     container: archlinux/archlinux:base-devel
+    needs: version
+
+    env:
+      VERSION_NAME: ${{ needs.version.outputs.name }}
 
     steps:
     - name: Setup container
       run: |
         pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
-    
+
     - name: Checkout code
       id: checkout-code
       uses: actions/checkout@v6
@@ -26,9 +61,7 @@ jobs:
     - name: Build release
       id: build-release
       run: |
-        export VERSION_NAME="${GITHUB_REF##*/}-${GITHUB_SHA##*/}"
         ./package-release.sh ${VERSION_NAME} build --no-package
-        echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_ENV
 
     - name: Upload artifacts
       id: upload-artifacts
@@ -40,9 +73,13 @@ jobs:
 
   artifacts-steamrt-sniper:
     runs-on: ubuntu-latest
-    container: 
+    container:
       image: registry.gitlab.steamos.cloud/steamrt/sniper/sdk:beta
       options: --user 1001
+    needs: version
+
+    env:
+      VERSION_NAME: ${{ needs.version.outputs.name }}
 
     steps:
     - name: Checkout code
@@ -59,9 +96,7 @@ jobs:
       id: build-release
       shell: bash
       run: |
-        export VERSION_NAME="${GITHUB_REF##*/}-${GITHUB_SHA##*/}"
         ./package-native.sh ${VERSION_NAME} build
-        echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_ENV
 
     - name: Upload artifacts
       id: upload-artifacts
@@ -73,17 +108,11 @@ jobs:
 
   merge-artifacts:
     runs-on: ubuntu-latest
-    needs: [artifacts-mingw-w64, artifacts-steamrt-sniper]
+    needs: [version, artifacts-mingw-w64, artifacts-steamrt-sniper]
     steps:
-      - name: Get version
-        id: get-version
-        shell: bash
-        run: |
-          echo "VERSION_NAME=${GITHUB_REF##*/}-${GITHUB_SHA##*/}" >> $GITHUB_ENV
-
       - name: Merge Artifacts
         uses: actions/upload-artifact/merge@v7
         with:
-          name: dxvk-${{ env.VERSION_NAME }}
+          name: dxvk-${{ needs.version.outputs.name }}
           pattern: dxvk*
           delete-merged: true

@@ -32,6 +32,7 @@ namespace dxvk {
     // may fail e.g. with older vkd3d-proton builds.
     m_presenter->QueryInterface(__uuidof(IDXGIVkSwapChain1), reinterpret_cast<void**>(&m_presenter1));
     m_presenter->QueryInterface(__uuidof(IDXGIVkSwapChain2), reinterpret_cast<void**>(&m_presenter2));
+    m_presenter->QueryInterface(__uuidof(IDXGIVkSwapChain3), reinterpret_cast<void**>(&m_presenter3));
 
     m_frameRateOption = m_factory->GetOptions()->maxFrameRate;
 
@@ -46,6 +47,7 @@ namespace dxvk {
     }
 
     // Ensure that RGBA16 swap chains are scRGB if supported
+    UpdateSourceSize(m_desc.Width, m_desc.Height);
     UpdateColorSpace(m_desc.Format, m_colorSpace);
 
     // Somewhat hacky way to determine whether to forward the
@@ -180,15 +182,21 @@ namespace dxvk {
   
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::GetBackgroundColor(
           DXGI_RGBA*                pColor) {
-    Logger::err("DxgiSwapChain::GetBackgroundColor: Not implemented");
-    return E_NOTIMPL;
+    if (!pColor)
+      return E_INVALIDARG;
+
+    *pColor = m_backgroundColor;
+    return S_OK;
   }
   
   
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::GetRotation(
           DXGI_MODE_ROTATION*       pRotation) {
-    Logger::err("DxgiSwapChain::GetRotation: Not implemented");
-    return E_NOTIMPL;
+    if (!pRotation)
+      return E_INVALIDARG;
+
+    *pRotation = m_rotation;
+    return S_OK;
   }
   
   
@@ -345,7 +353,6 @@ namespace dxvk {
           UINT                      SyncInterval,
           UINT                      PresentFlags,
     const DXGI_PRESENT_PARAMETERS*  pPresentParameters) {
-
     if (SyncInterval > 4)
       return DXGI_ERROR_INVALID_CALL;
 
@@ -368,7 +375,7 @@ namespace dxvk {
 
     if (wsi::isWindow(m_window) || !m_window) {
       std::lock_guard<dxvk::mutex> lockBuf(m_lockBuffer);
-      hr = m_presenter->Present(SyncInterval, PresentFlags, nullptr);
+      hr = m_presenter->Present(SyncInterval, PresentFlags, pPresentParameters);
     }
 
     if (PresentFlags & DXGI_PRESENT_TEST)
@@ -455,6 +462,7 @@ namespace dxvk {
     if (FAILED(hr))
       return hr;
 
+    UpdateSourceSize(m_desc.Width, m_desc.Height);
     UpdateColorSpace(m_desc.Format, m_colorSpace);
     return hr;
   }
@@ -552,19 +560,29 @@ namespace dxvk {
   
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::SetBackgroundColor(
     const DXGI_RGBA*                pColor) {
-    Logger::err("DxgiSwapChain::SetBackgroundColor: Not implemented");
-    return E_NOTIMPL;
+    if (!pColor)
+      return E_INVALIDARG;
+
+    m_backgroundColor = *pColor;
+
+    if (!m_presenter3)
+      return S_OK;
+
+    return m_presenter3->SetBackgroundColor(pColor);
   }
   
   
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::SetRotation(
           DXGI_MODE_ROTATION        Rotation) {
+    if (Rotation == DXGI_MODE_ROTATION_UNSPECIFIED || Rotation > DXGI_MODE_ROTATION_ROTATE270)
+      return E_INVALIDARG;
 
-    if (Rotation == DXGI_MODE_ROTATION_IDENTITY)
-      return S_OK;
+    m_rotation = Rotation;
 
-    Logger::err(str::format("DxgiSwapChain::SetRotation(", Rotation,"): Not implemented"));
-    return E_NOTIMPL;
+    if (!m_presenter3)
+      return Rotation == DXGI_MODE_ROTATION_IDENTITY ? S_OK : E_NOTIMPL;
+
+    return m_presenter3->SetRotation(Rotation);
   }
   
   
@@ -598,9 +616,8 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::GetSourceSize(
           UINT*                     pWidth,
           UINT*                     pHeight) {
-    // TODO implement properly once supported
-    if (pWidth)  *pWidth  = m_desc.Width;
-    if (pHeight) *pHeight = m_desc.Height;
+    if (pWidth)  *pWidth  = m_sourceSize.width;
+    if (pHeight) *pHeight = m_sourceSize.height;
     return S_OK;
   }
 
@@ -631,11 +648,9 @@ namespace dxvk {
       return E_INVALIDARG;
 
     std::lock_guard<dxvk::mutex> lock(m_lockBuffer);
-
-    RECT region = { 0, 0, LONG(Width), LONG(Height) };
-    return m_presenter->SetPresentRegion(&region);
+    return UpdateSourceSize(Width, Height);
   }
-  
+
 
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::CheckColorSpaceSupport(
           DXGI_COLOR_SPACE_TYPE           ColorSpace,
@@ -1046,9 +1061,25 @@ namespace dxvk {
   }
 
 
+  HRESULT DxgiSwapChain::UpdateSourceSize(
+          UINT                    Width,
+          UINT                    Height) {
+    // Ignore this feature and do not forward it to the presenter. The interactions
+    // with scaling and rotation are not documented and do not seem very useful, as
+    // the present region serves as a scaling factor rather than clamping the source
+    // rect, and is applied post-rotation while the given coordinates are validated
+    // against the pre-rotation back buffer size. This Also appears to be a no-op
+    // with SCALING_STRETCH scaling, while introducing scaling for SCALING_NONE and
+    // actually enlarging the present region in that case.
+    m_sourceSize.width = Width;
+    m_sourceSize.height = Height;
+    return S_OK;
+  }
+
+
   void DxgiSwapChain::UpdateTargetFrameRate(
           UINT                    SyncInterval) {
-    if (m_presenter2 == nullptr)
+    if (!m_presenter2)
       return;
 
     // Engage the frame limiter with large sync intervals even in windowed

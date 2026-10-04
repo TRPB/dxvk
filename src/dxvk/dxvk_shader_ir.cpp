@@ -600,8 +600,12 @@ namespace dxvk {
 
 
     dxbc_spv::ir::Builder::iterator handleUserInput(dxbc_spv::ir::Builder::iterator op) {
-      if (m_stage == dxbc_spv::ir::ShaderStage::ePixel)
+      if (m_stage == dxbc_spv::ir::ShaderStage::ePixel) {
         handleInputInterpolation(op);
+
+        auto locationMask = 1u << uint32_t(op->getOperand(op->getFirstLiteralOperandIndex()));
+        m_metadata.flatShadingInputs |= m_info.flatShadingInputs & locationMask;
+      }
 
       return ++op;
     }
@@ -628,10 +632,12 @@ namespace dxvk {
           m_metadata.flags.set(DxvkShaderFlag::ExportsPosition);
         } break;
 
-        case dxbc_spv::ir::BuiltIn::eLayerIndex:
+        case dxbc_spv::ir::BuiltIn::eLayerIndex: {
+          m_metadata.flags.set(DxvkShaderFlag::ExportsLayer);
+        } break;
+
         case dxbc_spv::ir::BuiltIn::eViewportIndex: {
-          if (m_stage != dxbc_spv::ir::ShaderStage::eGeometry)
-            m_metadata.flags.set(DxvkShaderFlag::ExportsViewportIndexLayerFromVertexStage);
+          m_metadata.flags.set(DxvkShaderFlag::ExportsViewport);
         } break;
 
         case dxbc_spv::ir::BuiltIn::eSampleMask: {
@@ -2025,9 +2031,12 @@ namespace dxvk {
 
     // Fix up shader I/O based on shader linkage
     { dxbc_spv::ir::LowerIoPass ioPass(irBuilder);
+      if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+        ioPass.resolveUnwrittenPsOutputs();
+
       if (linkage) {
-        if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsFlatShading && m_info.flatShadingInputs)
-          ioPass.enableFlatInterpolation(m_info.flatShadingInputs);
+        if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsFlatShading && m_metadata.flatShadingInputs)
+          ioPass.enableFlatInterpolation(m_metadata.flatShadingInputs);
 
         if (m_metadata.stage == VK_SHADER_STAGE_GEOMETRY_BIT && linkage->inputTopology != m_metadata.inputTopology)
           ioPass.changeGsInputPrimitiveType(convertPrimitiveType(linkage->inputTopology));
@@ -2230,6 +2239,7 @@ namespace dxvk {
     options.arithmeticOptions.lowerDot = true;
     options.arithmeticOptions.lowerSinCos = m_info.options.flags.test(DxvkShaderCompileFlag::LowerSinCos);
     options.arithmeticOptions.lowerMsad = true;
+    options.arithmeticOptions.lowerUdiv = true;
     options.arithmeticOptions.lowerF32toF16 = m_info.options.flags.test(DxvkShaderCompileFlag::LowerF32toF16);
     options.arithmeticOptions.lowerConvertFtoI = m_info.options.flags.test(DxvkShaderCompileFlag::LowerFtoI);
     options.arithmeticOptions.lowerGsVertexCountIn = false;

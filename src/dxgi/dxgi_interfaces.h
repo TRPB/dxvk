@@ -144,6 +144,16 @@ IDXGIVkSwapChain2 : public IDXGIVkSwapChain1 {
 };
 
 
+MIDL_INTERFACE("fa25651a-ae62-4ddd-9086-29ea3144820a")
+IDXGIVkSwapChain3 : public IDXGIVkSwapChain2 {
+  virtual HRESULT STDMETHODCALLTYPE SetBackgroundColor(
+    const DXGI_RGBA*                pColor) = 0;
+
+  virtual HRESULT STDMETHODCALLTYPE SetRotation(
+          DXGI_MODE_ROTATION        Rotation) = 0;
+};
+
+
 /**
  * \brief Private DXGI presenter factory
  */
@@ -306,6 +316,54 @@ IDXGIVkInteropSurface : public IUnknown {
           VkImage*              pHandle,
           VkImageLayout*        pLayout,
           VkImageCreateInfo*    pInfo) = 0;
+};
+
+
+/**
+ * \brief Buffer interface for Vulkan interop
+ *
+ * Provides access to the backing resource of a
+ * DXGI surface, which is typically a D3D texture.
+ */
+MIDL_INTERFACE("0493ad63-b9db-40d6-a5fa-33629de9d66b")
+IDXGIVkInteropBuffer : public IUnknown {
+  /**
+   * \brief Retrieves device interop interfaceSlots
+   *
+   * Queries the device that owns the surface for
+   * the \ref IDXGIVkInteropDevice interface.
+   * \param [out] ppDevice The device interface
+   * \returns \c S_OK on success
+   */
+  virtual HRESULT STDMETHODCALLTYPE GetDevice(
+          IDXGIVkInteropDevice**  ppDevice) = 0;
+
+  /**
+   * \brief Retrieves Vulkan buffer info
+   *
+   * Retrieves buffer handle and properties.
+   *
+   * \note Calling this on a buffer will prevent DXVK from relocating
+   *       the buffer, which may increase memory fragmentation and may
+   *       also have a small performance impact since commands that
+   *       would otherwise discard can no longer run out of order.
+   *
+   * \param [out] pGpuAddress If not \c nullptr, this will contain the
+   *    base address of the buffer. This already accounts for the offset
+   *    into the given \c VkBuffer.
+   * \param [out] pHandle Buffer handle. If not \c nullptr, then the
+   *    buffer offset in \c pOffset must also be queried.
+   * \param [out] pOffset Byte offset into the Vulkan buffer object.
+   * \param [out] pInfo Buffer info. Crucially, this will contain the
+   *    buffer size.
+   * \returns \c S_OK, on success, or \c E_INVALIDARG if the
+   *    combination of parameters doesn't make sense.
+   */
+  virtual HRESULT STDMETHODCALLTYPE GetVulkanBufferInfo(
+          VkDeviceAddress*      pGpuAddress,
+          VkBuffer*             pHandle,
+          VkDeviceSize*         pOffset,
+          VkBufferCreateInfo*   pInfo) = 0;
 };
 
 
@@ -475,9 +533,11 @@ __CRT_UUID_DECL(IDXGIVkInteropAdapter,     0x3a6d8f2c,0xb0e8,0x4ab4,0xb4,0xdc,0x
 __CRT_UUID_DECL(IDXGIVkInteropDevice,      0xe2ef5fa5,0xdc21,0x4af7,0x90,0xc4,0xf6,0x7e,0xf6,0xa0,0x93,0x23);
 __CRT_UUID_DECL(IDXGIVkInteropDevice1,     0xe2ef5fa5,0xdc21,0x4af7,0x90,0xc4,0xf6,0x7e,0xf6,0xa0,0x93,0x24);
 __CRT_UUID_DECL(IDXGIVkInteropSurface,     0x5546cf8c,0x77e7,0x4341,0xb0,0x5d,0x8d,0x4d,0x50,0x00,0xe7,0x7d);
+__CRT_UUID_DECL(IDXGIVkInteropBuffer,      0x0493ad63,0xb9db,0x40d6,0xa5,0xfa,0x33,0x62,0x9d,0xe9,0xd6,0x6b);
 __CRT_UUID_DECL(IDXGIVkSurfaceFactory,     0x1e7895a1,0x1bc3,0x4f9c,0xa6,0x70,0x29,0x0a,0x4b,0xc9,0x58,0x1a);
 __CRT_UUID_DECL(IDXGIVkSwapChain,          0xe4a9059e,0xb569,0x46ab,0x8d,0xe7,0x50,0x1b,0xd2,0xbc,0x7f,0x7a);
 __CRT_UUID_DECL(IDXGIVkSwapChain1,         0x785326d4,0xb77b,0x4826,0xae,0x70,0x8d,0x08,0x30,0x8e,0xe6,0xd1);
 __CRT_UUID_DECL(IDXGIVkSwapChain2,         0xaed91093,0xe02e,0x458c,0xbd,0xef,0xa9,0x7d,0xa1,0xa7,0xe6,0xd2);
+__CRT_UUID_DECL(IDXGIVkSwapChain3,         0xfa25651a,0xae62,0x4ddd,0x90,0x86,0x29,0xea,0x31,0x44,0x82,0x0a);
 __CRT_UUID_DECL(IDXGIVkSwapChainFactory,   0xe7d6c3ca,0x23a0,0x4e08,0x9f,0x2f,0xea,0x52,0x31,0xdf,0x66,0x33);
 #endif

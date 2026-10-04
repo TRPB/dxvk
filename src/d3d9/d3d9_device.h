@@ -7,7 +7,6 @@
 #include "d3d9_include.h"
 #include "d3d9_cursor.h"
 #include "d3d9_format.h"
-#include "d3d9_multithread.h"
 #include "d3d9_adapter.h"
 #include "d3d9_constant_buffer.h"
 #include "d3d9_constant_copy.h"
@@ -226,7 +225,7 @@ namespace dxvk {
     friend struct D3D9WindowContext;
     friend class D3D9ConstantBuffer;
     friend class D3D9UserDefinedAnnotation;
-    friend class DxvkD3D8Bridge;
+    friend class DxvkLegacyD3DDeviceBridge;
     friend D3D9VkInteropDevice;
 
     using CbvIndex = D3D9ShaderResourceMapping::CbvIndex;
@@ -807,8 +806,6 @@ namespace dxvk {
 
     bool SupportsVCacheQuery() const;
 
-    bool IsExtended();
-
     HWND GetWindow();
 
     const Rc<DxvkDevice>& GetDXVKDevice() {
@@ -969,7 +966,7 @@ namespace dxvk {
 
     inline bool IsNVDepthBoundsTestEnabled () {
       // NVDB is not supported by D3D8
-      if (unlikely(m_isD3D8Compatible))
+      if (unlikely(m_d3dCompatibility.test(D3DCompatibility::D3D8)))
         return false;
 
       return m_state.renderStates[D3DRS_ADAPTIVETESS_X] == uint32_t(D3D9Format::NVDB);
@@ -1059,7 +1056,7 @@ namespace dxvk {
     void BindIndices();
 
     D3D9DeviceLock LockDevice() {
-      return m_multithread.AcquireLock();
+      return m_multithread.acquire();
     }
 
     const D3D9Options* GetOptions() const {
@@ -1079,7 +1076,7 @@ namespace dxvk {
     void ConsiderFlush(GpuFlushType FlushType);
 
     bool ChangeReportedMemory(int64_t delta) {
-      if (IsExtended())
+      if (m_d3dCompatibility.test(D3DCompatibility::D3D9Ex))
         return true;
 
       int64_t availableMemory = m_availableMemory.fetch_add(delta);
@@ -1134,8 +1131,8 @@ namespace dxvk {
       return m_recorder != nullptr;
     }
 
-    bool IsD3D8Compatible() const {
-      return m_isD3D8Compatible;
+    bool IsD3DCompatibile(D3DCompatibility d3dCompatibility) const {
+      return m_d3dCompatibility.test(d3dCompatibility);
     }
 
     // Device Lost
@@ -1627,7 +1624,6 @@ namespace dxvk {
     D3D9VBSlotTracking              m_vbSlotTracking;
 
     bool                            m_isSWVP;
-    bool                            m_isD3D8Compatible;
     bool                            m_ffZTest          = false;
 
     // the enablement of below features is tracked independently
@@ -1697,7 +1693,9 @@ namespace dxvk {
     D3D9VkInteropDevice             m_d3d9Interop;
     D3D9ON12_ARGS                   m_d3d9On12Args = { };
     D3D9On12                        m_d3d9On12;
-    DxvkD3D8Bridge                  m_d3d8Bridge;
+
+    DxvkLegacyD3DDeviceBridge       m_legacyD3DBridge;
+    D3DCompatibilityFlags           m_d3dCompatibility;
 
     // Sampler statistics
     constexpr static uint32_t       SamplerCountBits = 12u;

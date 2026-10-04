@@ -54,7 +54,6 @@ namespace dxvk {
     , m_stagingBufferFence ( new sync::Fence() )
     , m_multithread        ( BehaviorFlags & D3DCREATE_MULTITHREADED )
     , m_isSWVP             ( (BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0 )
-    , m_isD3D8Compatible   ( pParent->IsD3D8Compatible() )
     , m_csThread           ( dxvkDevice, dxvkDevice->createContext() )
     , m_csChunk            ( AllocCsChunk() )
     , m_submissionFence    ( new sync::Fence() )
@@ -62,7 +61,8 @@ namespace dxvk {
     , m_d3d9Interop        ( this )
     , m_d3d9On12Args       ( pAdapter->Get9On12Args() )
     , m_d3d9On12           ( this )
-    , m_d3d8Bridge         ( this ) {
+    , m_legacyD3DBridge    ( this )
+    , m_d3dCompatibility   ( pParent->GetD3DCompatibilityFlags() ) {
 
     InitShaderOptions();
 
@@ -179,18 +179,16 @@ namespace dxvk {
 
     *ppvObject = nullptr;
 
-    bool extended = m_parent->IsExtended()
-                 && riid == __uuidof(IDirect3DDevice9Ex);
-
     if (riid == __uuidof(IUnknown)
      || riid == __uuidof(IDirect3DDevice9)
-     || extended) {
+     || (m_d3dCompatibility.test(D3DCompatibility::D3D9Ex) &&
+         riid == __uuidof(IDirect3DDevice9Ex))) {
       *ppvObject = ref(this);
       return S_OK;
     }
 
-    if (riid == __uuidof(IDxvkD3D8Bridge)) {
-      *ppvObject = ref(&m_d3d8Bridge);
+    if (riid == __uuidof(IDxvkLegacyD3DDeviceBridge)) {
+      *ppvObject = ref(&m_legacyD3DBridge);
       return S_OK;
     }
 
@@ -392,7 +390,7 @@ namespace dxvk {
   }
 
 
-  void    STDMETHODCALLTYPE D3D9DeviceEx::SetCursorPosition(int X, int Y, DWORD Flags) {
+  void STDMETHODCALLTYPE D3D9DeviceEx::SetCursorPosition(int X, int Y, DWORD Flags) {
     D3D9DeviceLock lock = LockDevice();
 
     // I was not able to find an instance
@@ -407,7 +405,7 @@ namespace dxvk {
   }
 
 
-  BOOL    STDMETHODCALLTYPE D3D9DeviceEx::ShowCursor(BOOL bShow) {
+  BOOL STDMETHODCALLTYPE D3D9DeviceEx::ShowCursor(BOOL bShow) {
     D3D9DeviceLock lock = LockDevice();
 
     return m_cursor.ShowCursor(bShow);
@@ -440,7 +438,7 @@ namespace dxvk {
   }
 
 
-  UINT    STDMETHODCALLTYPE D3D9DeviceEx::GetNumberOfSwapChains() {
+  UINT STDMETHODCALLTYPE D3D9DeviceEx::GetNumberOfSwapChains() {
     // This only counts the implicit swapchain...
 
     return 1;
@@ -463,7 +461,7 @@ namespace dxvk {
         return hr;
     }
 
-    if (!IsExtended()) {
+    if (!m_d3dCompatibility.test(D3DCompatibility::D3D9Ex)) {
       // The internal references are always cleared, regardless of whether the Reset call succeeds.
       ResetState(pPresentationParameters);
       m_implicitSwapchain->DestroyBackBuffers();
@@ -501,6 +499,8 @@ namespace dxvk {
 
     m_cursor.ResetCursor();
 
+    const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+
     /*
       * Before calling the IDirect3DDevice9::Reset method for a device,
       * an application should release any explicit render targets,
@@ -510,16 +510,16 @@ namespace dxvk {
       * We have to check after ResetState clears the references held by SetTexture, etc.
       * This matches what Windows D3D9 does.
     */
-    if (unlikely(m_losableResourceCounter.load() != 0 && !IsExtended() && m_d3d9Options.countLosableResources)) {
+    if (unlikely(m_losableResourceCounter.load() != 0 && !isExtended && m_d3d9Options.countLosableResources)) {
       Logger::warn(str::format("Device reset failed because device still has alive losable resources: Device not reset. Remaining resources: ", m_losableResourceCounter.load()));
       m_deviceLostState = D3D9DeviceLostState::NotReset;
       // D3D8 returns D3DERR_DEVICELOST here, whereas D3D9 returns D3DERR_INVALIDCALL.
-      return m_isD3D8Compatible ? D3DERR_DEVICELOST : D3DERR_INVALIDCALL;
+      return m_d3dCompatibility.test(D3DCompatibility::D3D8) ? D3DERR_DEVICELOST : D3DERR_INVALIDCALL;
     }
 
     hr = ResetSwapChain(pPresentationParameters, nullptr);
     if (unlikely(FAILED(hr))) {
-      if (!IsExtended()) {
+      if (!isExtended) {
         Logger::warn("Device reset failed: Device not reset");
         m_deviceLostState = D3D9DeviceLostState::NotReset;
       }
@@ -654,7 +654,8 @@ namespace dxvk {
                    !ValidateSharedTexture(*pSharedHandle, D3DRTYPE_TEXTURE, desc)))
         return E_INVALIDARG;
 
-      const Com<D3D9Texture2D> texture = new D3D9Texture2D(this, &desc, IsExtended(), pSharedHandle);
+      const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+      const Com<D3D9Texture2D> texture = new D3D9Texture2D(this, &desc, isExtended, pSharedHandle);
 
       m_initializer->InitTexture(texture->GetCommonTexture(), initialData);
       *ppTexture = texture.ref();
@@ -722,7 +723,8 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
-      const Com<D3D9Texture3D> texture = new D3D9Texture3D(this, &desc, IsExtended());
+      const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+      const Com<D3D9Texture3D> texture = new D3D9Texture3D(this, &desc, isExtended);
       m_initializer->InitTexture(texture->GetCommonTexture());
       *ppVolumeTexture = texture.ref();
 
@@ -788,7 +790,8 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
-      const Com<D3D9TextureCube> texture = new D3D9TextureCube(this, &desc, IsExtended());
+      const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+      const Com<D3D9TextureCube> texture = new D3D9TextureCube(this, &desc, isExtended);
       m_initializer->InitTexture(texture->GetCommonTexture());
       *ppCubeTexture = texture.ref();
 
@@ -831,7 +834,9 @@ namespace dxvk {
     desc.Type   = D3DRTYPE_VERTEXBUFFER;
     desc.Usage  = Usage;
 
-    if (FAILED(D3D9CommonBuffer::ValidateBufferProperties(&desc, IsExtended())))
+    const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+
+    if (FAILED(D3D9CommonBuffer::ValidateBufferProperties(&desc, isExtended)))
       return D3DERR_INVALIDCALL;
 
     if (unlikely(pSharedHandle != nullptr && *pSharedHandle != nullptr &&
@@ -839,7 +844,7 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
-      const Com<D3D9VertexBuffer> buffer = new D3D9VertexBuffer(this, &desc, IsExtended());
+      const Com<D3D9VertexBuffer> buffer = new D3D9VertexBuffer(this, &desc, isExtended);
       m_initializer->InitBuffer(buffer->GetCommonBuffer());
       *ppVertexBuffer = buffer.ref();
 
@@ -881,7 +886,9 @@ namespace dxvk {
     desc.Type   = D3DRTYPE_INDEXBUFFER;
     desc.Usage  = Usage;
 
-    if (FAILED(D3D9CommonBuffer::ValidateBufferProperties(&desc, IsExtended())))
+    const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+
+    if (FAILED(D3D9CommonBuffer::ValidateBufferProperties(&desc, isExtended)))
       return D3DERR_INVALIDCALL;
 
     if (unlikely(pSharedHandle != nullptr && *pSharedHandle != nullptr &&
@@ -889,7 +896,7 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
-      const Com<D3D9IndexBuffer> buffer = new D3D9IndexBuffer(this, &desc, IsExtended());
+      const Com<D3D9IndexBuffer> buffer = new D3D9IndexBuffer(this, &desc, isExtended);
       m_initializer->InitBuffer(buffer->GetCommonBuffer());
       *ppIndexBuffer = buffer.ref();
 
@@ -978,7 +985,7 @@ namespace dxvk {
     if (unlikely(dstTextureInfo->Desc()->MultiSample != D3DMULTISAMPLE_NONE))
       return D3DERR_INVALIDCALL;
 
-    const DxvkFormatInfo* formatInfo = lookupFormatInfo(dstTextureInfo->GetFormatMapping().FormatColor);
+    const DxvkFormatInfo* formatInfo = lookupFormatInfo(dstTextureInfo->GetFormatMapping().Format);
 
     VkOffset3D srcOffset = { 0u, 0u, 0u };
     VkOffset3D dstOffset = { 0u, 0u, 0u };
@@ -1151,8 +1158,16 @@ namespace dxvk {
     if (src->GetSurfaceExtent() != dst->GetSurfaceExtent())
       return D3DERR_INVALIDCALL;
 
-    if (dstTexInfo->Desc()->Pool == D3DPOOL_DEFAULT)
-      return this->StretchRect(pRenderTarget, nullptr, pDestSurface, nullptr, D3DTEXF_NONE);
+    if (unlikely(srcTexInfo->Desc()->Pool != D3DPOOL_DEFAULT))
+      return D3DERR_INVALIDCALL;
+
+    // Our D3D8 implementation uses it in CopyRects to copy DEFAULT -> SYSTEMMEM/SCRATCH/MANAGED.
+    // TODO: Using it for MANAGED is problematic because it doesn't update the image of a MANAGED texture.
+    if (unlikely(!m_d3dCompatibility.test(D3DCompatibility::D3D8) && dstTexInfo->Desc()->Pool != D3DPOOL_SYSTEMMEM))
+      return D3DERR_INVALIDCALL;
+
+    if (unlikely(srcTexInfo->Desc()->MultiSample != D3DMULTISAMPLE_NONE))
+      return D3DERR_INVALIDCALL;
 
     VkExtent3D dstTexExtent = dstTexInfo->GetExtentMip(dst->GetMipLevel());
     VkExtent3D srcTexExtent = srcTexInfo->GetExtentMip(src->GetMipLevel());
@@ -1325,6 +1340,10 @@ namespace dxvk {
       uint32_t(blitInfo.dstOffsets[1].y - blitInfo.dstOffsets[0].y),
       uint32_t(blitInfo.dstOffsets[1].z - blitInfo.dstOffsets[0].z) };
 
+    if (unlikely(srcCopyExtent.width == 0 || srcCopyExtent.height == 0
+      || dstCopyExtent.width == 0 || dstCopyExtent.height == 0))
+      return D3D_OK;
+
     bool srcIsDS = IsDepthStencilFormat(srcFormat);
     bool dstIsDS = IsDepthStencilFormat(dstFormat);
     if (unlikely(srcIsDS || dstIsDS)) {
@@ -1363,7 +1382,7 @@ namespace dxvk {
       bool srcHasAttachmentUsage = (srcTextureInfo->Desc()->Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) != 0;
 
       // D3D9Ex allows StretchRect to regular (non-RT) textures if it is a simple copy.
-      bool isCopy = IsExtended()
+      bool isCopy = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex)
         && pSourceRect == nullptr && pDestRect == nullptr // Yes, the rects have to be null. Even passing a rect that is the same size as the texture is invalid.
         && srcTextureInfo->Desc()->Pool == D3DPOOL_DEFAULT
         && dstTextureInfo->Desc()->Pool == D3DPOOL_DEFAULT
@@ -1374,7 +1393,8 @@ namespace dxvk {
       // - both destination and source are depth stencil surfaces
       // - both destination and source are offscreen plain surfaces.
       // The only way to get a surface with resource type D3DRTYPE_SURFACE without USAGE_RT or USAGE_DS is CreateOffscreenPlainSurface.
-      if (unlikely((!dstHasAttachmentUsage && (!dstIsSurface || !srcIsSurface || srcHasAttachmentUsage)) && !m_isD3D8Compatible && !isCopy))
+      if (unlikely((!dstHasAttachmentUsage && (!dstIsSurface || !srcIsSurface || srcHasAttachmentUsage)) &&
+                                               !m_d3dCompatibility.test(D3DCompatibility::D3D8) && !isCopy))
         return D3DERR_INVALIDCALL;
     }
 
@@ -1588,7 +1608,10 @@ namespace dxvk {
         Rc<DxvkImageView> view = cImage->createView(viewKey);
 
         if (cOffset == VkOffset3D() && cExtent == cImage->mipLevelExtent(viewKey.mipIndex)) {
-          ctx->clearRenderTarget(view, cSubresource.aspectMask, cClearValue, 0u);
+          DxvkAttachment attachment = {};
+          attachment.view = view;
+
+          ctx->clearRenderTarget(attachment, cSubresource.aspectMask, cClearValue, 0u);
         } else {
           ctx->clearImageView(view, cOffset, cExtent,
             cSubresource.aspectMask, cClearValue);
@@ -1800,7 +1823,7 @@ namespace dxvk {
       const int32_t vendorId = m_dxvkDevice->properties().core.properties.vendorID;
       const bool exact = m_depthBiasRepresentation.depthBiasExact;
       const bool forceUnorm = m_depthBiasRepresentation.depthBiasRepresentation == VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT;
-      const float rValue = GetDepthBufferRValue(ds->GetCommonTexture()->GetFormatMapping().FormatColor, vendorId, exact, forceUnorm);
+      const float rValue = GetDepthBufferRValue(ds->GetCommonTexture()->GetFormatMapping().Format, vendorId, exact, forceUnorm);
       if (m_depthBiasScale != rValue) {
         m_depthBiasScale = rValue;
         m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
@@ -1939,7 +1962,7 @@ namespace dxvk {
       if (Flags & D3DCLEAR_STENCIL)
         depthAspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
 
-      depthAspectMask &= lookupFormatInfo(m_state.depthStencil->GetCommonTexture()->GetFormatMapping().FormatColor)->aspectMask;
+      depthAspectMask &= lookupFormatInfo(m_state.depthStencil->GetCommonTexture()->GetFormatMapping().Format)->aspectMask;
     }
 
     auto ClearImageView = [this](
@@ -1968,7 +1991,10 @@ namespace dxvk {
           cAspectMask = aspectMask,
           cImageView  = imageView
         ] (DxvkContext* ctx) {
-          ctx->clearRenderTarget(cImageView,
+          DxvkAttachment attachment = {};
+          attachment.view = cImageView;
+
+          ctx->clearRenderTarget(attachment,
             cAspectMask, cClearValue, 0u);
         });
       }
@@ -2495,7 +2521,7 @@ namespace dxvk {
             if ((Value == AlphaToCoverageEnable
               || Value == AlphaToCoverageDisable) &&
                  vendorId == amdVendorId &&
-                 !m_isD3D8Compatible) {
+                 !m_d3dCompatibility.test(D3DCompatibility::D3D8)) {
               UpdateAlphaToCoverangeAndAlphaTest();
               break;
             }
@@ -2512,7 +2538,7 @@ namespace dxvk {
             // INST (AMD specific)
             if (unlikely(Value == uint32_t(D3D9Format::INST) &&
                          vendorId == amdVendorId &&
-                         !m_isD3D8Compatible)) {
+                         !m_d3dCompatibility.test(D3DCompatibility::D3D8))) {
               // Geometry instancing is supported by SM3, but ATI/AMD
               // exposed this hack to retroactively enable it on their
               // SM2-capable hardware. It's esentially a no-op.
@@ -2521,7 +2547,7 @@ namespace dxvk {
 
             // CENT (AMD & Nvidia)
             if (unlikely(Value == uint32_t(D3D9Format::CENT) &&
-                         !m_isD3D8Compatible)) {
+                         !m_d3dCompatibility.test(D3DCompatibility::D3D8))) {
               // Centroid (alternate pixel center) hack.
               // Taken into account anyway, so yet another no-op.
               break;
@@ -2578,7 +2604,7 @@ namespace dxvk {
           const uint32_t vendorId = m_adapter->GetVendorId();
 
           // Nvidia's driver hack for ATOC (also supported on Intel), COPM and SSAA
-          if (likely(vendorId != amdVendorId && !m_isD3D8Compatible)) {
+          if (likely(vendorId != amdVendorId && !m_d3dCompatibility.test(D3DCompatibility::D3D8))) {
             // ATOC (Nvidia & Intel)
             constexpr uint32_t AlphaToCoverageEnable  = uint32_t(D3D9Format::ATOC);
             // Disabling both ATOC and SSAA is done using D3DFMT_UNKNOWN (0)
@@ -2695,7 +2721,7 @@ namespace dxvk {
     try {
       const Com<D3D9StateBlock> sb = new D3D9StateBlock(this, stateBlockType);
       *ppSB = sb.ref();
-      if (!m_isD3D8Compatible)
+      if (!m_d3dCompatibility.test(D3DCompatibility::D3D8))
         m_losableResourceCounter++;
 
       return D3D_OK;
@@ -2730,7 +2756,7 @@ namespace dxvk {
     InitReturnPtr(ppSB);
 
     *ppSB = m_recorder.ref();
-    if (!m_isD3D8Compatible)
+    if (!m_d3dCompatibility.test(D3DCompatibility::D3D8))
       m_losableResourceCounter++;
     m_recorder = nullptr;
 
@@ -4269,13 +4295,7 @@ namespace dxvk {
     if (unlikely(ppSurface == nullptr))
       return D3DERR_INVALIDCALL;
 
-    // The new Create functions added in 9Ex only accept the new USAGE flags added with 9Ex.
-    // Yes, it actually fails when explicitly passing D3DUSAGE_RENDERTARGET.
-    if (unlikely(Usage & ~(D3DUSAGE_RESTRICTED_CONTENT | D3DUSAGE_RESTRICT_SHARED_RESOURCE | D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER)))
-      return D3DERR_INVALIDCALL;
-
-    if (unlikely((Usage & (D3DUSAGE_RESTRICT_SHARED_RESOURCE | D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER)) != 0
-      && pSharedHandle == nullptr))
+    if (unlikely(!D3D9CommonTexture::ValidateExUsages(Usage, pSharedHandle)))
       return D3DERR_INVALIDCALL;
 
     D3D9_COMMON_TEXTURE_DESC desc;
@@ -4303,7 +4323,8 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
-      const Com<D3D9Surface> surface = new D3D9Surface(this, &desc, IsExtended(), nullptr, pSharedHandle);
+      const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+      const Com<D3D9Surface> surface = new D3D9Surface(this, &desc, isExtended, nullptr, pSharedHandle);
       m_initializer->InitTexture(surface->GetCommonTexture());
       *ppSurface = surface.ref();
       m_losableResourceCounter++;
@@ -4330,12 +4351,7 @@ namespace dxvk {
     if (unlikely(ppSurface == nullptr))
       return D3DERR_INVALIDCALL;
 
-    // The new Create functions added in 9Ex only accept the new USAGE flags added with 9Ex.
-    if (unlikely(Usage & ~(D3DUSAGE_RESTRICTED_CONTENT | D3DUSAGE_RESTRICT_SHARED_RESOURCE | D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER)))
-      return D3DERR_INVALIDCALL;
-
-    if (unlikely((Usage & (D3DUSAGE_RESTRICT_SHARED_RESOURCE | D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER)) != 0
-      && pSharedHandle == nullptr))
+    if (unlikely(!D3D9CommonTexture::ValidateExUsages(Usage, pSharedHandle)))
       return D3DERR_INVALIDCALL;
 
     D3D9_COMMON_TEXTURE_DESC desc;
@@ -4382,7 +4398,8 @@ namespace dxvk {
                    !ValidateSharedTexture(*pSharedHandle, D3DRTYPE_SURFACE, desc)))
         return E_INVALIDARG;
 
-      const Com<D3D9Surface> surface = new D3D9Surface(this, &desc, IsExtended(), nullptr, pSharedHandle);
+      const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+      const Com<D3D9Surface> surface = new D3D9Surface(this, &desc, isExtended, nullptr, pSharedHandle);
       m_initializer->InitTexture(surface->GetCommonTexture(), initialData);
       *ppSurface = surface.ref();
 
@@ -4413,13 +4430,7 @@ namespace dxvk {
     if (unlikely(ppSurface == nullptr))
       return D3DERR_INVALIDCALL;
 
-    // The new Create functions added in 9Ex only accept the new USAGE flags added with 9Ex.
-    // Yes, it actually fails when explicitly passing D3DUSAGE_DEPTHSTENCIL.
-    if (unlikely(Usage & ~(D3DUSAGE_RESTRICTED_CONTENT | D3DUSAGE_RESTRICT_SHARED_RESOURCE | D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER)))
-      return D3DERR_INVALIDCALL;
-
-    if (unlikely((Usage & (D3DUSAGE_RESTRICT_SHARED_RESOURCE | D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER)) != 0
-      && pSharedHandle == nullptr))
+    if (unlikely(!D3D9CommonTexture::ValidateExUsages(Usage, pSharedHandle)))
       return D3DERR_INVALIDCALL;
 
     D3D9_COMMON_TEXTURE_DESC desc;
@@ -4447,7 +4458,8 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
-      const Com<D3D9Surface> surface = new D3D9Surface(this, &desc, IsExtended(), nullptr, pSharedHandle);
+      const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+      const Com<D3D9Surface> surface = new D3D9Surface(this, &desc, isExtended, nullptr, pSharedHandle);
       m_initializer->InitTexture(surface->GetCommonTexture());
       *ppSurface = surface.ref();
       m_losableResourceCounter++;
@@ -4711,11 +4723,6 @@ namespace dxvk {
   }
 
 
-  bool D3D9DeviceEx::IsExtended() {
-    return m_parent->IsExtended();
-  }
-
-
   bool D3D9DeviceEx::SupportsSWVP() {
     return m_dxvkDevice->features().core.features.vertexPipelineStoresAndAtomics;
   }
@@ -4830,11 +4837,10 @@ namespace dxvk {
       // Perform submission. If the amount of staging memory allocated since the
       // last submission exceeds the hard limit, we need to submit to guarantee
       // forward progress. Ideally, this should not happen very often.
-      GpuFlushType flushType = stagingBufferAllocated <= m_stagingMemorySignaled + MaxMemoryInFlight
-        ? GpuFlushType::ImplicitSynchronization
-        : GpuFlushType::ExplicitFlush;
-
-      ConsiderFlush(flushType);
+      if (stagingBufferAllocated <= m_stagingMemorySignaled + MaxMemoryInFlight)
+        ConsiderFlush(GpuFlushType::ImplicitSynchronization);
+      else
+        ExecuteFlush(false);
     }
 
     // Wait for staging memory to get recycled.
@@ -4989,7 +4995,7 @@ namespace dxvk {
 
     auto& formatMapping = pResource->GetFormatMapping();
     const DxvkFormatInfo* formatInfo = formatMapping.IsValid()
-      ? lookupFormatInfo(formatMapping.FormatColor) : UnsupportedFormatInfo(pResource->Desc()->Format);
+      ? lookupFormatInfo(formatMapping.Format) : UnsupportedFormatInfo(pResource->Desc()->Format);
 
     auto subresource = pResource->GetSubresourceFromIndex(
         formatInfo->aspectMask, Subresource);
@@ -5285,7 +5291,7 @@ namespace dxvk {
     // Now that data has been written into the buffer,
     // we need to copy its contents into the image
 
-    auto formatInfo = lookupFormatInfo(pDestTexture->GetFormatMapping().FormatColor);
+    auto formatInfo = lookupFormatInfo(pDestTexture->GetFormatMapping().Format);
     auto srcSubresource = pSrcTexture->GetSubresourceFromIndex(
       formatInfo->aspectMask, SrcSubresource);
 
@@ -5395,7 +5401,7 @@ namespace dxvk {
       D3D9BufferSlice slice = AllocStagingBuffer(pSrcTexture->GetMipSize(SrcSubresource));
       VkDeviceSize pitch = align(srcBlockCount.width * formatElementSize, 4);
 
-      const DxvkFormatInfo* convertedFormatInfo = lookupFormatInfo(convertFormat.FormatColor);
+      const DxvkFormatInfo* convertedFormatInfo = lookupFormatInfo(convertFormat.Format);
       VkImageSubresourceLayers convertedDstLayers = { convertedFormatInfo->aspectMask, dstSubresource.mipLevel, dstSubresource.arrayLayer, 1 };
 
       util::packImageData(
@@ -6887,7 +6893,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::UpdateAlphaToCoverangeAndAlphaTest() {
-    if (likely(!m_isD3D8Compatible)) {
+    if (likely(!m_d3dCompatibility.test(D3DCompatibility::D3D8))) {
       // ATOC is not supported by D3D8
       bool alphaToCoverageEnabled = true;
 
@@ -7224,15 +7230,14 @@ namespace dxvk {
 
       key.setDepthCompare(cIsDepth, VK_COMPARE_OP_LESS_OR_EQUAL);
 
-      if (cState.mipFilter) {
-        uint32_t anisotropy = cState.maxAnisotropy;
+      if (!cIsMultiMip) {
+        // For some reason, using the 0.0 - 0.0 range breaks linear filtering in some cases
+        key.setLodRange(0.0f, 1.0f, 0.0f);
+      } else if (cState.mipFilter) {
+        uint32_t anisotropy = cState.minFilter == D3DTEXF_ANISOTROPIC
+          ? cState.maxAnisotropy : 0u;
 
-        // Anisotropic filtering doesn't make any sense with only one mip
-        if (cState.minFilter != D3DTEXF_ANISOTROPIC || !cIsMultiMip)
-          anisotropy = 0u;
-
-        // Forcing anisotropic filtering doesn't make any sense with only one mip
-        if (m_d3d9Options.samplerAnisotropy != -1 && cIsMultiMip && cState.minFilter > D3DTEXF_POINT)
+        if (m_d3d9Options.samplerAnisotropy != -1 && cState.minFilter > D3DTEXF_POINT)
           anisotropy = m_d3d9Options.samplerAnisotropy;
 
         key.setAniso(anisotropy);
@@ -7907,8 +7912,8 @@ namespace dxvk {
     // Vertex shader version checks
     if (ShaderType == D3D9ShaderType::VertexShader) {
       // Late fixed-function capable hardware exposed support for VS 1.1
-      const uint32_t shaderModelVS = IsD3D8Compatible() ? 1u : std::max(1u, m_d3d9Options.shaderModel);
-
+      const uint32_t shaderModelVS = m_d3dCompatibility.test(D3DCompatibility::D3D8) ? 1u
+                                                                                     : std::max(1u, m_d3d9Options.shaderModel);
       if (unlikely(info.getVersion().first > shaderModelVS
                || (info.getVersion().first == 1 && info.getVersion().second > 1)
                // Skip checking the SM2 minor version, as it has a 2_x mode apparently
@@ -7918,8 +7923,8 @@ namespace dxvk {
       }
     // Pixel shader version checks
     } else if (ShaderType == D3D9ShaderType::PixelShader) {
-      const uint32_t shaderModelPS = IsD3D8Compatible() ? std::min(1u, m_d3d9Options.shaderModel) : m_d3d9Options.shaderModel;
-
+      const uint32_t shaderModelPS = m_d3dCompatibility.test(D3DCompatibility::D3D8) ? std::min(1u, m_d3d9Options.shaderModel)
+                                                                                     : m_d3d9Options.shaderModel;
       if (unlikely(info.getVersion().first > shaderModelPS
                || (info.getVersion().first == 1 && info.getVersion().second > 4)
                // Skip checking the SM2 minor version, as it has a 2_x mode apparently
@@ -8541,8 +8546,8 @@ namespace dxvk {
       srcSubresource.aspectMask = dstSubresource.aspectMask & srcSubresource.aspectMask;
     } else if (unlikely(dstSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT && srcSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT)) {
       Logger::err(str::format("D3D9DeviceEx::ResolveZ: Trying to blit from ",
-        srcFormatInfo.FormatColor, " (aspect ", srcSubresource.aspectMask, ")", " to ",
-        dstFormatInfo.FormatColor, " (aspect ", dstSubresource.aspectMask, ")"
+        srcFormatInfo.Format, " (aspect ", srcSubresource.aspectMask, ")", " to ",
+        dstFormatInfo.Format, " (aspect ", dstSubresource.aspectMask, ")"
       ));
       return;
     }
@@ -8721,7 +8726,8 @@ namespace dxvk {
     rs[D3DRS_POINTSCALE_B]               = bit::cast<DWORD>(0.0f);
     rs[D3DRS_POINTSCALE_C]               = bit::cast<DWORD>(0.0f);
     rs[D3DRS_POINTSIZE]                  = bit::cast<DWORD>(1.0f);
-    rs[D3DRS_POINTSIZE_MIN]              = m_isD3D8Compatible ? bit::cast<DWORD>(0.0f) : bit::cast<DWORD>(1.0f);
+    rs[D3DRS_POINTSIZE_MIN]              = m_d3dCompatibility.test(D3DCompatibility::D3D8) ? bit::cast<DWORD>(0.0f)
+                                                                                           : bit::cast<DWORD>(1.0f);
     rs[D3DRS_POINTSIZE_MAX]              = bit::cast<DWORD>(limits.pointSizeRange[1]);
     m_pushData.vs.pointSize = EncodePointSize(rs[D3DRS_POINTSIZE]);
     m_pushData.vs.pointSizeMin = EncodePointSize(rs[D3DRS_POINTSIZE_MIN]);
@@ -8863,7 +8869,7 @@ namespace dxvk {
 
     // In D3D8, this represents the value of D3DRS_PATCHSEGMENTS.
     // It defaults to 1.0f and is reset as any other render state.
-    if (m_isD3D8Compatible)
+    if (m_d3dCompatibility.test(D3DCompatibility::D3D8))
       m_state.nPatchSegments = 1.0f;
 
     m_alphaTestEnabled = false;
@@ -8920,6 +8926,8 @@ namespace dxvk {
       m_mostRecentlyUsedSwapchain = m_implicitSwapchain.ptr();
     }
 
+    const bool isExtended = m_d3dCompatibility.test(D3DCompatibility::D3D9Ex);
+
     if (pPresentationParameters->EnableAutoDepthStencil) {
       D3D9_COMMON_TEXTURE_DESC desc;
       desc.Width              = pPresentationParameters->BackBufferWidth;
@@ -8940,13 +8948,13 @@ namespace dxvk {
       if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_SURFACE, &desc)))
         return D3DERR_NOTAVAILABLE;
 
-      m_autoDepthStencil = new D3D9Surface(this, &desc, IsExtended(), nullptr, nullptr);
+      m_autoDepthStencil = new D3D9Surface(this, &desc, isExtended, nullptr, nullptr);
       m_initializer->InitTexture(m_autoDepthStencil->GetCommonTexture());
       SetDepthStencilSurface(m_autoDepthStencil.ptr());
       m_losableResourceCounter++;
     }
 
-    if (!IsExtended()) {
+    if (!isExtended) {
       SetRenderTarget(0, m_implicitSwapchain->GetBackBuffer(0));
     } else {
       // Extended devices will not reset the MinZ/MaxZ viewport values
@@ -9089,7 +9097,7 @@ namespace dxvk {
   void D3D9DeviceEx::NotifyWindowActivated(HWND window, bool activated) {
     D3D9DeviceLock lock = LockDevice();
 
-    if (likely(!m_d3d9Options.deviceLossOnFocusLoss || IsExtended()))
+    if (likely(!m_d3d9Options.deviceLossOnFocusLoss || m_d3dCompatibility.test(D3DCompatibility::D3D9Ex)))
       return;
 
     if (activated && m_deviceLostState == D3D9DeviceLostState::Lost) {
@@ -9164,47 +9172,54 @@ namespace dxvk {
         destroy.hResource = open.hResource;
         D3DKMTDestroyAllocation(&destroy);
 
-        if (desc.dxgi.size != sizeof(desc.d3d9) || desc.dxgi.version != 1) {
-          Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid size: ",
-                                   desc.dxgi.size, " or version: ", desc.dxgi.version));
-          return false;
-        }
-        if (desc.d3d9.type != type) {
-          Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid type: ", desc.d3d9.type));
-          return false;
-        }
-        if (desc.d3d9.dxgi.width != textureDesc.Width || desc.d3d9.dxgi.height != textureDesc.Height) {
-          Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid dimensions: ", desc.d3d9.dxgi.width, "x", desc.d3d9.dxgi.height));
-          return false;
-        }
-        if (desc.d3d9.format != static_cast<D3DFORMAT>(textureDesc.Format)) {
-          Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid format: ", desc.d3d9.format));
-          return false;
-        }
-        if (textureDesc.Usage & ~desc.d3d9.usage) {
-          Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid usage: ", desc.d3d9.usage));
-          return false;
-        }
-        if (type == D3DRTYPE_TEXTURE && desc.d3d9.texture.levels != textureDesc.MipLevels) {
-          Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid mip levels: ", desc.d3d9.texture.levels));
-          return false;
+        if (desc.dxgi.size == sizeof(desc.d3d9) && desc.dxgi.version == 1) {
+          if (desc.d3d9.type != type) {
+            Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid type: ", desc.d3d9.type));
+            return false;
+          }
+          if (desc.d3d9.dxgi.width != textureDesc.Width || desc.d3d9.dxgi.height != textureDesc.Height) {
+            Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid dimensions: ", desc.d3d9.dxgi.width, "x", desc.d3d9.dxgi.height));
+            return false;
+          }
+          if (desc.d3d9.format != static_cast<D3DFORMAT>(textureDesc.Format)) {
+            Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid format: ", desc.d3d9.format));
+            return false;
+          }
+          if (textureDesc.Usage & ~desc.d3d9.usage) {
+            Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid usage: ", desc.d3d9.usage));
+            return false;
+          }
+          if (type == D3DRTYPE_TEXTURE && desc.d3d9.texture.levels != textureDesc.MipLevels) {
+            Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid mip levels: ", desc.d3d9.texture.levels));
+            return false;
+          }
+
+          Logger::debug(str::format("Found D3D9 desc: ", desc.d3d9.type));
+          Logger::debug(str::format("  dxgi.width: ", desc.d3d9.dxgi.width));
+          Logger::debug(str::format("  dxgi.height: ", desc.d3d9.dxgi.height));
+          Logger::debug(str::format("  format: ", desc.d3d9.format));
+          Logger::debug(str::format("  usage: ", desc.d3d9.usage));
+          if (desc.d3d9.type == D3DRTYPE_TEXTURE) {
+            Logger::debug(str::format("  texture.width: ", desc.d3d9.texture.width));
+            Logger::debug(str::format("  texture.height: ", desc.d3d9.texture.height));
+            Logger::debug(str::format("  texture.depth: ", desc.d3d9.texture.depth));
+            Logger::debug(str::format("  texture.levels: ", desc.d3d9.texture.levels));
+          } else if (desc.d3d9.type == D3DRTYPE_SURFACE) {
+            Logger::debug(str::format("  surface.width: ", desc.d3d9.surface.width));
+            Logger::debug(str::format("  surface.height: ", desc.d3d9.surface.height));
+          }
+
+          return true;
         }
 
-        Logger::debug(str::format("Found D3D9 desc: ", desc.d3d9.type));
-        Logger::debug(str::format("  dxgi.width: ", desc.d3d9.dxgi.width));
-        Logger::debug(str::format("  dxgi.height: ", desc.d3d9.dxgi.height));
-        Logger::debug(str::format("  format: ", desc.d3d9.format));
-        Logger::debug(str::format("  usage: ", desc.d3d9.usage));
-        if (desc.d3d9.type == D3DRTYPE_TEXTURE) {
-          Logger::debug(str::format("  texture.width: ", desc.d3d9.texture.width));
-          Logger::debug(str::format("  texture.height: ", desc.d3d9.texture.height));
-          Logger::debug(str::format("  texture.depth: ", desc.d3d9.texture.depth));
-          Logger::debug(str::format("  texture.levels: ", desc.d3d9.texture.levels));
-        } else if (desc.d3d9.type == D3DRTYPE_SURFACE) {
-          Logger::debug(str::format("  surface.width: ", desc.d3d9.surface.width));
-          Logger::debug(str::format("  surface.height: ", desc.d3d9.surface.height));
+        if (desc.dxgi.size >= sizeof(desc.d3d11) && desc.dxgi.version == 4) {
+          Logger::info("D3D9DeviceEx::ValidateSharedTexture: Found D3D11 texture, skipping validation.");
+          return true;
         }
-        return true;
+
+        Logger::warn(str::format("D3D9DeviceEx::ValidateSharedTexture: Invalid size: ",
+                                  desc.dxgi.size, " or version: ", desc.dxgi.version));
+        return false;
       }
     }
 

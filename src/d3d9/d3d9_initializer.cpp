@@ -43,6 +43,8 @@ namespace dxvk {
           void*              pInitialData) {
     if (pTexture->GetMapMode() == D3D9_COMMON_TEXTURE_MAP_MODE_NONE)
       return;
+    if (pTexture->GetImage() != nullptr && pTexture->GetImage()->info().sharing.mode == DxvkSharedHandleMode::Import)
+      return;
 
     void* mapPtr = nullptr;
 
@@ -118,7 +120,7 @@ namespace dxvk {
     if (pInitialData) {
       // Initial data is only supported for textures with 1 subresource
       VkExtent3D mipExtent = pTexture->GetExtentMip(0);
-      const DxvkFormatInfo* formatInfo = lookupFormatInfo(pTexture->GetFormatMapping().FormatColor);
+      const DxvkFormatInfo* formatInfo = lookupFormatInfo(pTexture->GetFormatMapping().Format);
       VkExtent3D blockCount = util::computeBlockCount(mipExtent, formatInfo->blockSize);
       uint32_t pitch = blockCount.width * formatInfo->elementSize;
       uint32_t alignedPitch = align(pitch, 4);
@@ -170,7 +172,7 @@ namespace dxvk {
 
 
   void D3D9Initializer::SyncSharedTexture(D3D9CommonTexture* pResource) {
-    if (pResource->GetImage() == nullptr || pResource->GetImage()->info().sharing.mode == DxvkSharedHandleMode::None)
+    if (pResource->GetImage() == nullptr || pResource->GetImage()->info().sharing.mode != DxvkSharedHandleMode::Export)
       return;
 
     // Ensure that initialization commands are submitted and waited on before

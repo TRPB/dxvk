@@ -28,6 +28,7 @@ namespace dxvk {
     HasStorageDescriptors,
     HasSampleRateShading,
     HasSampleMaskExport,
+    HasLayerExport,
     UnrollMergedDraws,
   };
 
@@ -676,6 +677,8 @@ namespace dxvk {
 
     std::pair<VkResult, VkPipeline> createOptimizedPipeline(
       const DxvkGraphicsPipelineFastInstanceKey& key) const;
+
+    DxvkShader& getLastPreRasterStage();
 
     void destroyBasePipelines();
 

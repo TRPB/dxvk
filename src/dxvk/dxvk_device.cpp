@@ -605,10 +605,15 @@ namespace dxvk {
     const Rc<Presenter>&            presenter,
     const Rc<DxvkLatencyTracker>&   tracker,
           uint64_t                  frameId,
+          uint32_t                  rectCount,
+    const VkRectLayerKHR*           rects,
           DxvkSubmitStatus*         status) {
     DxvkPresentInfo presentInfo = { };
     presentInfo.presenter = presenter;
     presentInfo.frameId = frameId;
+
+    for (uint32_t i = 0u; i < rectCount; i++)
+      presentInfo.rects.push_back(rects[i]);
 
     DxvkLatencyInfo latencyInfo;
     latencyInfo.tracker = tracker;
@@ -726,7 +731,8 @@ namespace dxvk {
                   || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_V3DV)
                   || m_adapter->matchesDriver(VK_DRIVER_ID_BROADCOM_PROPRIETARY)
                   || m_adapter->matchesDriver(VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA)
-                  || m_adapter->matchesDriver(VK_DRIVER_ID_IMAGINATION_PROPRIETARY);
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_IMAGINATION_PROPRIETARY)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_KOSMICKRISP);
 
     applyTristate(tilerMode, m_options.tilerMode);
     hints.preferRenderPassOps = tilerMode;

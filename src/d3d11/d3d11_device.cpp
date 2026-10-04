@@ -567,11 +567,6 @@ namespace dxvk {
     D3D11_COMMON_RESOURCE_DESC resourceDesc;
     GetCommonResourceDesc(pResource, &resourceDesc);
     
-    if (resourceDesc.Dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-      Logger::warn("D3D11: Cannot create render target view for a buffer");
-      return S_OK; // It is required to run Battlefield 3 and Battlefield 4.
-    }
-    
     // The view description is optional. If not defined, it
     // will use the resource's format and all array layers.
     D3D11_RENDER_TARGET_VIEW_DESC1 desc;
@@ -602,7 +597,12 @@ namespace dxvk {
       return S_FALSE;
     
     try {
-      *ppRTView = ref(new D3D11RenderTargetView(this, pResource, &desc));
+      auto rtv = ref(new D3D11RenderTargetView(this, pResource, &desc));
+
+      if (desc.ViewDimension == D3D11_RTV_DIMENSION_BUFFER)
+        m_initializer->InitRtvImage(rtv);
+
+      *ppRTView = rtv;
       return S_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());
@@ -2708,6 +2708,18 @@ namespace dxvk {
   }
 
 
+  void D3D11Device::LockBuffer(
+    const Rc<DxvkBuffer>&           Buffer) {
+    auto chunk = AllocCsChunk(DxvkCsChunkFlag::SingleUse);
+
+    chunk->push([cBuffer = Buffer] (DxvkContext* ctx) {
+      ctx->ensureBufferAddress(cBuffer);
+    });
+
+    m_context->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
+  }
+
+
   bool D3D11Device::LockImage(
     const Rc<DxvkImage>&            Image,
           VkImageUsageFlags         Usage) {
@@ -3237,13 +3249,7 @@ namespace dxvk {
     if (!Buffer->canRelocate())
       return;
 
-    auto chunk = m_device->AllocCsChunk(DxvkCsChunkFlag::SingleUse);
-
-    chunk->push([cBuffer = Buffer] (DxvkContext* ctx) {
-      ctx->ensureBufferAddress(cBuffer);
-    });
-
-    m_device->GetContext()->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
+    m_device->LockBuffer(Buffer);
   }
 
 
@@ -3764,6 +3770,30 @@ namespace dxvk {
   
 
 
+  HMODULE D3D11DXGIDevice::initVendorHacks() {
+#ifdef _WIN32
+    if (m_dxvkAdapter->info().vendorId == uint32_t(DxvkGpuVendor::Intel)) {
+      char sysdir[MAX_PATH], path[MAX_PATH];
+      GetSystemDirectoryA(sysdir, sizeof(sysdir));
+      snprintf(path, sizeof(path),
+               "%s\\DriverStore\\FileRepository\\igd_faux.inf_1\\igd10iumd64.dll", sysdir);
+      HMODULE igd10iumd = ::LoadLibraryA(path);
+      if (igd10iumd)
+        Logger::info("Loaded igd10iumd64.dll for Intel driver workarounds");
+      return igd10iumd;
+    }
+#endif
+    return nullptr;
+  }
+
+  void D3D11DXGIDevice::cleanupVendorHacks() {
+#ifdef _WIN32
+    if (m_vendorHacks.igd10iumd64)
+      ::FreeLibrary(m_vendorHacks.igd10iumd64);
+#endif
+  }
+
+
   D3D11DXGIDevice::D3D11DXGIDevice(
           IDXGIAdapter*       pAdapter,
           ID3D12Device*       pD3D12Device,
@@ -3786,12 +3816,12 @@ namespace dxvk {
     m_metaDevice    (this),
     m_dxvkFactory   (this, &m_d3d11Device),
     m_destructionNotifier(this) {
-
+    m_vendorHacks.igd10iumd64 = initVendorHacks();
   }
-  
-  
-  D3D11DXGIDevice::~D3D11DXGIDevice() {
 
+
+  D3D11DXGIDevice::~D3D11DXGIDevice() {
+    cleanupVendorHacks();
   }
   
   

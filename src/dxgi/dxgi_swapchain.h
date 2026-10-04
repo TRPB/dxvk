@@ -13,6 +13,7 @@
 
 #include "../wsi/wsi_window.h"
 #include "../wsi/wsi_monitor.h"
+#include "../util/util_hotpatch.h"
 
 namespace dxvk {
   
@@ -93,15 +94,18 @@ namespace dxvk {
     
     BOOL STDMETHODCALLTYPE IsTemporaryMonoSupported() final;
 
+    DXVK_HOTPATCHABLE
     HRESULT STDMETHODCALLTYPE Present(
             UINT                      SyncInterval,
             UINT                      Flags) final;
     
+    DXVK_HOTPATCHABLE
     HRESULT STDMETHODCALLTYPE Present1(
             UINT                      SyncInterval,
             UINT                      PresentFlags,
       const DXGI_PRESENT_PARAMETERS*  pPresentParameters) final;
 
+    DXVK_HOTPATCHABLE
     HRESULT STDMETHODCALLTYPE ResizeBuffers(
             UINT                      BufferCount,
             UINT                      Width,
@@ -109,6 +113,7 @@ namespace dxvk {
             DXGI_FORMAT               NewFormat,
             UINT                      SwapChainFlags) final;
     
+    DXVK_HOTPATCHABLE
     HRESULT STDMETHODCALLTYPE ResizeBuffers1(
             UINT                      BufferCount,
             UINT                      Width,
@@ -118,9 +123,11 @@ namespace dxvk {
       const UINT*                     pCreationNodeMask,
             IUnknown* const*          ppPresentQueue) final;
 
+    DXVK_HOTPATCHABLE
     HRESULT STDMETHODCALLTYPE ResizeTarget(
       const DXGI_MODE_DESC*           pNewTargetParameters) final;
     
+    DXVK_HOTPATCHABLE
     HRESULT STDMETHODCALLTYPE SetFullscreenState(
             BOOL                      Fullscreen,
             IDXGIOutput*              pTarget) final;
@@ -188,6 +195,7 @@ namespace dxvk {
     Com<IDXGIVkSwapChain>           m_presenter;
     Com<IDXGIVkSwapChain1>          m_presenter1;
     Com<IDXGIVkSwapChain2>          m_presenter2;
+    Com<IDXGIVkSwapChain3>          m_presenter3;
     
     HMONITOR                        m_monitor;
     bool                            m_monitorHasOutput = true;
@@ -201,6 +209,10 @@ namespace dxvk {
     bool                            m_is_d3d12;
 
     DXGI_COLOR_SPACE_TYPE           m_colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    DXGI_MODE_ROTATION              m_rotation = DXGI_MODE_ROTATION_IDENTITY;
+    DXGI_RGBA                       m_backgroundColor = {};
+
+    VkExtent2D                      m_sourceSize = {};
 
     uint32_t                        m_globalHDRStateSerial = 0;
     bool                            m_hasLatencyControl = false;
@@ -238,6 +250,10 @@ namespace dxvk {
     bool ValidateColorSpaceSupport(
             DXGI_FORMAT             Format,
             DXGI_COLOR_SPACE_TYPE   ColorSpace);
+
+    HRESULT UpdateSourceSize(
+            UINT                    Width,
+            UINT                    Height);
 
     HRESULT UpdateColorSpace(
             DXGI_FORMAT             Format,

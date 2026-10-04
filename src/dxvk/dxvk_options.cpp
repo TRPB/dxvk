@@ -25,10 +25,12 @@ namespace dxvk {
     enableGraphicsPipelineLibrary = config.getOption<Tristate>("dxvk.enableGraphicsPipelineLibrary", Tristate::Auto);
     enableDescriptorHeap  = config.getOption<Tristate>("dxvk.enableDescriptorHeap",   Tristate::Auto);
     enableDescriptorBuffer = config.getOption<Tristate>("dxvk.enableDescriptorBuffer", Tristate::Auto);
-    enableDescriptorUpdateTemplates = config.getOption<bool>("dxvk.enableDescriptorUpdateTemplates", true);
+    enableDescriptorUpdateTemplates = config.getOption<bool>("dxvk.enableDescriptorUpdateTemplates", false);
     enableUnifiedImageLayout = config.getOption<bool> ("dxvk.enableUnifiedImageLayouts", true);
     enableImplicitResolves = config.getOption<bool>   ("dxvk.enableImplicitResolves", true);
     enableNvRawAccessChains = config.getOption<bool>  ("dxvk.enableNvRawAccessChains", true);
+    enableNvCudaInterop   = config.getOption<bool>    ("dxvk.enableNvCudaInterop",    true);
+    enablePresentTiming   = config.getOption<bool>    ("dxvk.enablePresentTiming",    true);
     trackPipelineLifetime = config.getOption<Tristate>("dxvk.trackPipelineLifetime",  Tristate::Auto);
     useRawSsbo            = config.getOption<Tristate>("dxvk.useRawSsbo",             Tristate::Auto);
     hud                   = config.getOption<std::string>("dxvk.hud", "");

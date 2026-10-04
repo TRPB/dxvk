@@ -456,13 +456,13 @@ namespace dxvk {
     /**
      * \brief Clears an active render target
      * 
-     * \param [in] imageView Render target view to clear
+     * \param [in] attachment Render target to clear
      * \param [in] clearAspects Image aspects to clear
      * \param [in] clearValue The clear value
      * \param [in] discardAspects Image aspects to discard
      */
     void clearRenderTarget(
-      const Rc<DxvkImageView>&    imageView,
+      const DxvkAttachment&       attachment,
             VkImageAspectFlags    clearAspects,
             VkClearValue          clearValue,
             VkImageAspectFlags    discardAspects);
@@ -1336,6 +1336,9 @@ namespace dxvk {
     Rc<DxvkDevice>          m_device;
     DxvkObjects*            m_common;
 
+    uint64_t                m_frameCount = 0u;
+    std::pair<uint64_t, uint64_t> m_framesToCapture = {};
+
     uint64_t                m_trackingId = 0u;
     uint64_t                m_submitWaitId = 0u;
     uint64_t                m_submitLastId = 0u;
@@ -1630,6 +1633,12 @@ namespace dxvk {
             VkDeviceSize              subresourceAlignment,
             VkDeviceSize              sourceOffset);
 
+    void acquireShadowAttachment(const DxvkAttachment& attachment);
+    void releaseShadowAttachment(const DxvkAttachment& attachment);
+
+    void acquireShadowAttachments();
+    void releaseShadowAttachments();
+
     VkAttachmentStoreOp determineClearStoreOp(
             VkAttachmentLoadOp        loadOp) const;
 
@@ -1674,7 +1683,7 @@ namespace dxvk {
             VkRenderingAttachmentInfo&  attachment,
             DxvkAccess                  access) const;
 
-    void adjustRenderArea(const VkRect2D& rect);
+    void adjustRenderArea(const VkRect2D& rect, bool layered);
 
     void beginRenderPass();
     void endRenderPass(bool suspend);
@@ -1854,7 +1863,6 @@ namespace dxvk {
       return DxvkAccessFlags();
     }
 
-
     void emitMemoryBarrier(
             VkPipelineStageFlags      srcStages,
             VkAccessFlags             srcAccess,
@@ -1862,10 +1870,6 @@ namespace dxvk {
             VkAccessFlags             dstAccess);
 
     void trackDrawBuffer();
-
-    bool tryInvalidateDeviceLocalBuffer(
-      const Rc<DxvkBuffer>&           buffer,
-            VkDeviceSize              copySize);
 
     Rc<DxvkImageView> ensureImageViewCompatibility(
       const Rc<DxvkImageView>&        view,
@@ -2280,6 +2284,10 @@ namespace dxvk {
       m_cmd->track(view.image(), access);
     }
 
+    void beginFrameCapture();
+
+    void endFrameCapture();
+
     bool formatsAreImageCopyCompatible(
             VkFormat                  dstFormat,
             VkFormat                  srcFormat);
@@ -2298,6 +2306,8 @@ namespace dxvk {
 
     static VkFormat sanitizeTexelBufferFormat(
             VkFormat                  srcFormat);
+
+    static std::pair<uint64_t, uint64_t> parseFrameCaptureEnv();
 
   };
   

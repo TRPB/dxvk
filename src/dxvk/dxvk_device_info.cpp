@@ -37,18 +37,20 @@ namespace dxvk {
     HANDLE_EXT(extMultiDraw);                      \
     HANDLE_EXT(extNonSeamlessCubeMap);             \
     HANDLE_EXT(extPageableDeviceLocalMemory);      \
+    HANDLE_EXT(extPresentTiming);                  \
     HANDLE_EXT(extRobustness2);                    \
     HANDLE_EXT(extSampleLocations);                \
     HANDLE_EXT(extShaderModuleIdentifier);         \
     HANDLE_EXT(extShaderStencilExport);            \
-    HANDLE_EXT(extSwapchainColorSpace);            \
     HANDLE_EXT(extSwapchainMaintenance1);          \
     HANDLE_EXT(extTransformFeedback);              \
     HANDLE_EXT(extVertexAttributeDivisor);         \
+    HANDLE_EXT(khrCalibratedTimestamps);           \
     HANDLE_EXT(khrDeviceFault);                    \
     HANDLE_EXT(khrDynamicRenderingLocalRead);      \
     HANDLE_EXT(khrExternalMemoryWin32);            \
     HANDLE_EXT(khrExternalSemaphoreWin32);         \
+    HANDLE_EXT(khrIncrementalPresent);             \
     HANDLE_EXT(khrLoadStoreOpNone);                \
     HANDLE_EXT(khrMaintenance5);                   \
     HANDLE_EXT(khrMaintenance6);                   \
@@ -498,8 +500,7 @@ namespace dxvk {
       bool enableDescriptorHeap = m_properties.vk12.driverID == VK_DRIVER_ID_MESA_RADV
                                || m_properties.vk12.driverID == VK_DRIVER_ID_MESA_NVK
                                || m_properties.vk12.driverID == VK_DRIVER_ID_MESA_LLVMPIPE
-                               || m_properties.vk12.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA
-                               || m_properties.vk12.driverID == VK_DRIVER_ID_AMD_PROPRIETARY;
+                               || m_properties.vk12.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
 
       // Heap regresses performance on the initial NV driver releases.
       if (m_properties.vk12.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
@@ -546,7 +547,7 @@ namespace dxvk {
     if (!instance.options().enableUnifiedImageLayout)
       m_featuresSupported.khrUnifiedImageLayouts.unifiedImageLayouts = VK_FALSE;
 
-    if (env::is32BitHostPlatform() || !env::isWineVulkan() || safeMode) {
+    if (env::is32BitHostPlatform() || !env::isWineVulkan() || safeMode || !instance.options().enableNvCudaInterop) {
       // CUDA interop is unnecessary on 32-bit, no games use it. These extensions
       // can also cause device creation errors for unknown reasons.
       m_featuresSupported.nvxBinaryImport = VK_FALSE;
@@ -602,14 +603,34 @@ namespace dxvk {
     if (!instance.options().enableNvRawAccessChains)
       m_featuresSupported.nvRawAccessChains.shaderRawAccessChains = VK_FALSE;
 
+    // Disable somewhat broken present_id2 on older Nvidia drivers.
+    if (m_properties.vk12.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY
+     && m_properties.driverVersion < Version(595u, 0u, 0u))
+      m_featuresSupported.khrPresentId2.presentId2 = VK_FALSE;
+
+    // Disable present timing if the corresponding option is turned off.
+    if (!instance.options().enablePresentTiming)
+      m_featuresSupported.extPresentTiming.presentTiming = VK_FALSE;
+
     // Ensure we only enable one of present_id or present_id_2. Prefer the
-    // older versions of the present_id/wait extensions since the newer ones
-    // cause issues with external layers and apparently some Wayland setups
-    // on Mesa for unknown reasons.
-    if (m_featuresSupported.khrPresentId.presentId)
+    // older versions of these extensions if we don't have present timing
+    // support since the newer ones are causing issues in some environments.
+    if (m_featuresSupported.khrPresentId2.presentId2
+     && m_featuresSupported.extPresentTiming.presentTiming)
+      m_featuresSupported.khrPresentId.presentId = VK_FALSE;
+    else if (m_featuresSupported.khrPresentId.presentId)
       m_featuresSupported.khrPresentId2.presentId2 = VK_FALSE;
 
     // Sanitize features with other feature dependencies
+    if (!m_featuresSupported.khrCalibratedTimestamps
+     || !m_featuresSupported.khrPresentId2.presentId2)
+      m_featuresSupported.extPresentTiming.presentTiming = VK_FALSE;
+
+    if (!m_featuresSupported.extPresentTiming.presentTiming) {
+      m_featuresSupported.extPresentTiming.presentAtAbsoluteTime = VK_FALSE;
+      m_featuresSupported.extPresentTiming.presentAtRelativeTime = VK_FALSE;
+    }
+
     if (!m_featuresSupported.khrPresentId2.presentId2)
       m_featuresSupported.khrPresentWait2.presentWait2 = VK_FALSE;
 
@@ -991,6 +1012,11 @@ namespace dxvk {
       /* Enables more dynamic driver-side memory management */
       ENABLE_EXT_FEATURE(extPageableDeviceLocalMemory, pageableDeviceLocalMemory, false),
 
+      /* Present timing features, try to enable everything */
+      ENABLE_EXT_FEATURE(extPresentTiming, presentTiming, false),
+      ENABLE_EXT_FEATURE(extPresentTiming, presentAtAbsoluteTime, false),
+      ENABLE_EXT_FEATURE(extPresentTiming, presentAtRelativeTime, false),
+
       /* Robustness, all features effectively required for correctness */
       ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, true),
       ENABLE_EXT_FEATURE(extRobustness2, robustImageAccess2, false),
@@ -1005,9 +1031,6 @@ namespace dxvk {
       /* Stencil export, used both internally and in client APIs */
       ENABLE_EXT(extShaderStencilExport, false),
 
-      /* HDR color space support */
-      ENABLE_EXT(extSwapchainColorSpace, false),
-
       /* Swapchain maintenance, used to implement proper synchronization
        * and dynamic present modes to avoid swapchain recreation */
       ENABLE_EXT_FEATURE(extSwapchainMaintenance1, swapchainMaintenance1, false),
@@ -1020,6 +1043,9 @@ namespace dxvk {
       ENABLE_EXT_FEATURE(extVertexAttributeDivisor, vertexAttributeInstanceRateDivisor, false),
       ENABLE_EXT_FEATURE(extVertexAttributeDivisor, vertexAttributeInstanceRateZeroDivisor, false),
 
+      /* Required for present_timing */
+      ENABLE_EXT(khrCalibratedTimestamps, false),
+
       /* Hang debugging */
       ENABLE_EXT_FEATURE(khrDeviceFault, deviceFault, false),
       ENABLE_EXT_FEATURE(khrDeviceFault, deviceFaultVendorBinary, false),
@@ -1030,6 +1056,9 @@ namespace dxvk {
       /* External memory features for wine */
       ENABLE_EXT(khrExternalMemoryWin32, false),
       ENABLE_EXT(khrExternalSemaphoreWin32, false),
+
+      /* Dirty rects for presentation */
+      ENABLE_EXT(khrIncrementalPresent, false),
 
       /* LOAD_OP_NONE for certain tiler optimizations. Core feature
        * in Vulkan 1.4, so probably supported by everything we need. */

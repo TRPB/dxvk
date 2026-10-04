@@ -411,10 +411,6 @@ namespace dxvk {
     // mask for any attachment that the fragment shader does not write to.
     uint32_t fsOutputMask = shaders.fs ? shaders.fs->metadata().outputs.computeMask() : 0u;
 
-    // Dual-source blending can only write to one render target
-    if (state.useDualSourceBlending())
-      fsOutputMask &= 0x1;
-
     const VkColorComponentFlags rgbaWriteMask
       = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
       | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -429,7 +425,10 @@ namespace dxvk {
     // getLinkage) the SampleRateShading SPIR-V strip + mip-bias rewrite.
     TransparencyClass transparencyClass = classifyTransparencyPass(device, state);
 
-    for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+    // Dual-source blending can only write to one render target
+    uint32_t rtCount = state.useDualSourceBlending() ? 1u : uint32_t(MaxNumRenderTargets);
+
+    for (uint32_t i = 0; i < rtCount; i++) {
       rtColorFormats[i] = state.rt.getColorFormat(i);
 
       if (rtColorFormats[i]) {
@@ -462,6 +461,19 @@ namespace dxvk {
                 std::exchange(cbAttachments[i].dstAlphaBlendFactor, VK_BLEND_FACTOR_ZERO));
               cbAttachments[i].colorBlendOp =
                 std::exchange(cbAttachments[i].alphaBlendOp, VK_BLEND_OP_ADD);
+            }
+
+            // If we want to use dual-source blending but the the fragment shader does
+            // not export the second output, replace dual blend factos with zero.
+            if (!i && cbAttachments[i].blendEnable && !(fsOutputMask & 0x2u)) {
+              if (util::isDualSourceBlendFactor(cbAttachments[i].srcColorBlendFactor))
+                cbAttachments[i].srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+              if (util::isDualSourceBlendFactor(cbAttachments[i].dstColorBlendFactor))
+                cbAttachments[i].dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+              if (util::isDualSourceBlendFactor(cbAttachments[i].srcAlphaBlendFactor))
+                cbAttachments[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+              if (util::isDualSourceBlendFactor(cbAttachments[i].dstAlphaBlendFactor))
+                cbAttachments[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
             }
           }
         }
@@ -1249,6 +1261,9 @@ namespace dxvk {
       if (m_shaders.fs->metadata().flags.test(DxvkShaderFlag::ExportsSampleMask))
         m_flags.set(DxvkGraphicsPipelineFlag::HasSampleMaskExport);
     }
+
+    if (getLastPreRasterStage().metadata().flags.test(DxvkShaderFlag::ExportsLayer))
+      m_flags.set(DxvkGraphicsPipelineFlag::HasLayerExport);
   }
   
   
@@ -1723,6 +1738,19 @@ namespace dxvk {
   }
   
   
+  DxvkShader& DxvkGraphicsPipeline::getLastPreRasterStage() {
+    if (m_shaders.gs)
+      return *m_shaders.gs;
+
+    if (m_shaders.tes)
+      return *m_shaders.tes;
+
+    // TCS can't occur alone, so ignore.
+    // VS always exists.
+    return *m_shaders.vs;
+  }
+
+
   void DxvkGraphicsPipeline::destroyBasePipelines() {
     for (const auto& instance : m_basePipelines) {
       this->destroyVulkanPipeline(instance.second);

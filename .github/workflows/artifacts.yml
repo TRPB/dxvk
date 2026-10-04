@@ -67,52 +67,63 @@ jobs:
       id: upload-artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: dxvk-win-${{ env.VERSION_NAME }}
+        name: dxvk-${{ env.VERSION_NAME }}
         path: build/dxvk-${{ env.VERSION_NAME }}
         if-no-files-found: error
 
-  artifacts-steamrt-sniper:
+  release:
     runs-on: ubuntu-latest
-    container:
-      image: registry.gitlab.steamos.cloud/steamrt/sniper/sdk:beta
-      options: --user 1001
-    needs: version
+    needs: [version, artifacts-mingw-w64]
+    if: startsWith(github.ref, 'refs/tags/')
+
+    permissions:
+      contents: write
 
     env:
       VERSION_NAME: ${{ needs.version.outputs.name }}
 
     steps:
-    - name: Checkout code
-      id: checkout-code
-      uses: actions/checkout@v6
+    - name: Download build
+      id: download-build
+      uses: actions/download-artifact@v7
       with:
-        submodules: recursive
-        fetch-depth: 0
+        name: dxvk-${{ needs.version.outputs.name }}
+        path: dxvk
 
-    - name: Setup problem matcher
-      uses: Joshua-Ashton/gcc-problem-matcher@master
-
-    - name: Build release
-      id: build-release
-      shell: bash
+    - name: Package d3d9 DLLs
+      id: package-dlls
       run: |
-        ./package-native.sh ${VERSION_NAME} build
+        # d3d9 is the only DLL this fork patches, so that is all the
+        # release ships. The full DXVK DLL set stays available as the
+        # build artifact on the run itself.
+        mkdir -p "dxvk-${VERSION_NAME}/x32" "dxvk-${VERSION_NAME}/x64"
+        cp dxvk/x32/d3d9.dll "dxvk-${VERSION_NAME}/x32/"
+        cp dxvk/x64/d3d9.dll "dxvk-${VERSION_NAME}/x64/"
+        zip -r "dxvk-${VERSION_NAME}.zip" "dxvk-${VERSION_NAME}"
 
-    - name: Upload artifacts
-      id: upload-artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: dxvk-native-${{ env.VERSION_NAME }}
-        path: build/dxvk-native-${{ env.VERSION_NAME }}.tar.gz
-        if-no-files-found: error
+    - name: Publish release
+      id: publish-release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        TAG="${GITHUB_REF#refs/tags/}"
 
-  merge-artifacts:
-    runs-on: ubuntu-latest
-    needs: [version, artifacts-mingw-w64, artifacts-steamrt-sniper]
-    steps:
-      - name: Merge Artifacts
-        uses: actions/upload-artifact/merge@v7
-        with:
-          name: dxvk-${{ needs.version.outputs.name }}
-          pattern: dxvk*
-          delete-merged: true
+        # VERSION_NAME is <upstream build number>.<fork revision>, so
+        # stripping the last component names the upstream base.
+        cat > notes.md <<EOF
+        Based on upstream DXVK ${VERSION_NAME%.*}.
+
+        Contains \`x32/d3d9.dll\` and \`x64/d3d9.dll\`. Drop the one matching the game's architecture into its directory.
+        EOF
+
+        # Re-running a tag refreshes the asset rather than failing on an
+        # already-published release.
+        if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          gh release upload "${TAG}" "dxvk-${VERSION_NAME}.zip" \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+        else
+          gh release create "${TAG}" "dxvk-${VERSION_NAME}.zip" \
+            --repo "${GITHUB_REPOSITORY}"                       \
+            --title "${TAG}"                                    \
+            --notes-file notes.md
+        fi

@@ -118,12 +118,21 @@ jobs:
 
         # Re-running a tag refreshes the asset rather than failing on an
         # already-published release.
+        #
+        # The existing release may also be a draft: deleting a tag that a
+        # release points at demotes that release to a draft, and drafts
+        # are invisible on the releases page. So always force it back to
+        # published rather than assuming it already is.
         if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
           gh release upload "${TAG}" "dxvk-${VERSION_NAME}.zip" \
             --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release edit "${TAG}"                              \
+            --repo "${GITHUB_REPOSITORY}"                       \
+            --draft=false --latest
         else
           gh release create "${TAG}" "dxvk-${VERSION_NAME}.zip" \
             --repo "${GITHUB_REPOSITORY}"                       \
             --title "${TAG}"                                    \
-            --notes-file notes.md
+            --notes-file notes.md                               \
+            --latest
         fi
